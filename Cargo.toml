@@ -1,0 +1,49 @@
+[package]
+edition      = "2024"
+name         = "esp32_phyllotaxis"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "esp32_phyllotaxis"
+path = "./src/bin/main.rs"
+
+[dependencies]
+esp-hal = { version = "~1.1.0", features = ["defmt", "esp32s3", "unstable"] }
+
+esp-rtos = { version = "0.3.0", features = ["defmt", "embassy", "esp32s3"] }
+
+defmt                  = "1.0.1"
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["defmt", "esp32s3"] }
+
+embassy-executor = { version = "0.10.0", features = ["defmt"] }
+embassy-time     = { version = "0.5.0", features = ["defmt"] }
+esp-println      = { version = "0.17.0", features = ["defmt-espflash", "esp32s3"] }
+
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+
+# --- ported DSP core (pure no_std, hardware-agnostic) ---
+microfft = "0.6"
+libm     = "0.2"
+
+# --- needed for the port (see PORTING.md); versions TBD against esp-hal 1.1 ---
+# esp-hal-smartled is UNUSABLE on esp-hal 1.1: latest (0.17.0) and even git still
+# pin esp-hal "~1.0", and esp-rtos 0.3 / esp-bootloader 0.5 require esp-hal "~1.1",
+# so the versions can't coexist. Driving WS2812 via esp-hal's `rmt` directly instead
+# (PORTING.md fallback) -- which also makes smart-leds unnecessary.
+# embassy-sync     = { version = "...", features = ["defmt"] }    # match the embassy-executor 0.10 ecosystem
+# bytemuck         = { version = "1", default-features = false }  # I2S byte<->u16 cast
+
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1     # LLVM can perform better optimizations using a single thread
+debug         = 2     # prefer slower builds but better debugging experience
+lto           = 'fat'
+opt-level     = 's'
