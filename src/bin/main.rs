@@ -8,15 +8,21 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
-use esp_hal::peripherals;
+use esp_hal::dma_buffers;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::gpio::{Level, Output, OutputConfig};
-use esp_hal::rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator};
+use esp_hal::gpio::Level;
+use esp_hal::interrupt::Priority;
+use esp_hal::rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::Async;
+use esp_hal::i2s::master::{Config, I2s, I2sRx};
+
+use esp_rtos::embassy::InterruptExecutor;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, Instant};
+use embassy_sync::signal::Signal;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use static_cell::StaticCell;
 
@@ -43,6 +49,21 @@ const T0: PulseCode = PulseCode::new(Level::High, 32, Level::Low, 68);
 const T1: PulseCode = PulseCode::new(Level::High, 64, Level::Low, 36);
 
 static TX_BUFFER: StaticCell<[PulseCode; NUM_LEDS * 24 + 1]> = StaticCell::new();
+
+// The LED render runs on a high-priority interrupt executor so its RMT channel-RAM refills
+// preempt the audio FFT. On one cooperative executor, a ~1-2ms FFT starves the ~60us RMT
+// refill deadline and the WS2812 stream underflows mid-frame.
+static RENDER_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+
+static AUDIO: Signal<CriticalSectionRawMutex, AudioFeatures> = Signal::new();
+
+// I2S frame = [L 32-bit][R 32-bit] = 8 bytes, little-endian in the DMA buffer.
+// 24-bit mic data is left-justified in the 32-bit word; `>> 8` recovers the signed sample.
+fn decode_left_sample(buf: &[u8], i: usize) -> i32 {
+    let o = 8 * i;
+    let w = u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+    (w as i32) >> 8
+}
 
 fn encode(rgb: [Rgb; NUM_LEDS], tx: &mut [PulseCode; NUM_LEDS * 24 + 1]) {
     let mut i = 0;
@@ -75,27 +96,34 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
-    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap().into_async();
-
-    let mut channel = rmt.channel0.configure_tx(
-        &TxChannelConfig::default()
-        .with_clk_divider(1)
-        .with_idle_output(true)
-        .with_idle_output_level(Level::Low)
-    ).unwrap().with_pin(peripherals.GPIO4);
-
-
-    //*x = encode(Rgb::new(0,30,0));
-    //channel.transmit(x).await.unwrap();
-
+    // Continuous (circular) I2S ring: 4 descriptors x CHUNK_SIZE (4092). The clock must
+    // free-run so the INMP441 stays settled -- one-shot reads stop BCLK between reads and
+    // re-capture the mic's DC settling transient every window.
+    let (rx_buffer, rx_descs, _, _) = dma_buffers!(4 * 4092, 0);
+    let i2s = I2s::new(
+        peripherals.I2S0,
+        peripherals.DMA_CH0,
+        Config::new_tdm_philips().with_sample_rate(Rate::from_hz(32000)).with_data_format(esp_hal::i2s::master::DataFormat::Data32Channel32)
+    ).unwrap().into_async();
+    let mut i2s_rx = i2s
+        .i2s_rx
+        .with_bclk(peripherals.GPIO7)
+        .with_ws(peripherals.GPIO6)
+        .with_din(peripherals.GPIO5)
+        .build(rx_descs);
+    
     info!("Embassy initialized!");
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
-    spawner.spawn(unwrap!(render(channel)));
+    // High-priority interrupt executor for the time-critical LED render/RMT refill.
+    // The RMT channel is built inside the task (it's !Send, so it can't cross the SendSpawner).
+    let render_exec = RENDER_EXECUTOR.init(InterruptExecutor::new(sw_interrupt.software_interrupt1));
+    let render_spawner = render_exec.start(Priority::Priority3);
+    render_spawner.spawn(unwrap!(render(peripherals.RMT, peripherals.GPIO4)));
+
+    // Audio capture + FFT stays on the low-priority thread-mode executor.
+    spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
 
     loop {
-        info!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;
     }
 
@@ -103,12 +131,21 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn render(mut channel: Channel<'static, Async, Tx>) {
+async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::peripherals::GPIO4<'static>) {
+    let rmt = Rmt::new(rmt, Rate::from_mhz(80)).unwrap().into_async();
+    let mut channel = rmt.channel0.configure_tx(
+        &TxChannelConfig::default()
+            .with_clk_divider(1)
+            .with_idle_output(true)
+            .with_idle_output_level(Level::Low),
+    ).unwrap().with_pin(pin);
+
     let mut last = Instant::now();
     let mut t: f32 = 0.0;
     let mut bank = SketchBank::new();
     let mut next = Instant::now();
     let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
+    let mut last_audio = AudioFeatures::default();
     let tx_buf: &'static mut [PulseCode; NUM_LEDS* 24 + 1] = TX_BUFFER.init([PulseCode::end_marker(); NUM_LEDS * 24 + 1]);
     loop {
         next += Duration::from_millis(1000/120);
@@ -117,8 +154,8 @@ async fn render(mut channel: Channel<'static, Async, Tx>) {
         last = now;
         t += dt;
 
-        let audio = AudioFeatures::default();
-        let params = SketchParams { dt, t, audio, released: false };
+        if let Some(a) = AUDIO.try_take() { last_audio = a; }
+        let params = SketchParams { dt, t, audio: last_audio, released: false };
         bank.render(&mut led_buf, &params);
         apply_gamma(&mut led_buf);
 
@@ -127,5 +164,52 @@ async fn render(mut channel: Channel<'static, Async, Tx>) {
         channel.transmit(tx_buf).await.unwrap();
         
         Timer::at(next).await;
+    }
+}
+
+// One FFT window = 512 frames x 8 bytes/frame = 4096 bytes (multiple of the 8-byte frame,
+// so window boundaries stay frame-aligned).
+const WINDOW: usize = 512 * 8;
+
+// Staging: holds carry-over (< WINDOW) plus one pop (<= ring's available). Sized generously
+// so `pop` (which errors if the buffer is smaller than what's available) never underflows.
+static STAGE: StaticCell<[u8; 16384]> = StaticCell::new();
+
+#[embassy_executor::task]
+async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 4 * 4092]) {
+    let mut proc = AudioProcessor::new();
+    let mut transfer = match i2s_rx.read_dma_circular_async(buf) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("i2s circular init err: {}", e);
+            return;
+        }
+    };
+    let stage = STAGE.init([0u8; 16384]);
+    let mut fill = 0usize;
+    loop {
+        let n = match transfer.pop(&mut stage[fill..]).await {
+            Ok(n) => n,
+            Err(e) => {
+                error!("i2s pop err: {}", e);
+                fill = 0; // resync
+                continue;
+            }
+        };
+        fill += n;
+
+        while fill >= WINDOW {
+            // DC block: the INMP441 carries a DC offset that leaks into the lowest FFT bin.
+            // Subtract the window mean so band 0 isn't permanently pegged.
+            let mut sum = 0i64;
+            for i in 0..512 {
+                sum += decode_left_sample(&stage[..WINDOW], i) as i64;
+            }
+            let dc = (sum as f32 / 512.0) / 8388608.0;
+            let feats = proc.process(|i| decode_left_sample(&stage[..WINDOW], i) as f32 / 8388608.0 - dc);
+            AUDIO.signal(feats);
+            stage.copy_within(WINDOW..fill, 0);
+            fill -= WINDOW;
+        }
     }
 }

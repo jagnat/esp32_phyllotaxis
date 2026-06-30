@@ -18,6 +18,7 @@ esp-bootloader-esp-idf = { version = "0.5.0", features = ["defmt", "esp32s3"] }
 
 embassy-executor = { version = "0.10.0", features = ["defmt"] }
 embassy-time     = { version = "0.5.0", features = ["defmt"] }
+embassy-sync     = { version = "0.7.2", features = ["defmt"] }
 esp-println      = { version = "0.17.0", features = ["defmt-espflash", "esp32s3"] }
 
 critical-section = "1.2.0"

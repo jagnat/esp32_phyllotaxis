@@ -251,7 +251,23 @@ pub struct FullWhiteSketch;
 impl Sketch for FullWhiteSketch {
 	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		for (i, led) in  leds.iter_mut().enumerate() {
-			if i == 1 { *led = Rgb{r: 255, g: 255, b: 255} };
+			{ *led = Rgb{r: 255, g: 255, b: 255} };
+		}
+	}
+}
+
+pub struct HsvRadialSketch;
+impl Sketch for HsvRadialSketch {
+	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
+		for (i, led) in leds.iter_mut().enumerate() {
+			let x = LED_POSITIONS[i][0];
+			let y = LED_POSITIONS[i][1];
+
+			let theta = atan2f(y, x);
+
+			let hue = fmodf((theta / 3.14159) * 180.0 + 180.0 + p.t * 32.0, 360.0);
+			let color = Hsv::new(hue, 1.0, 1.0);
+			*led = hsv_to_rgb_rainbow(color);
 		}
 	}
 }
@@ -260,17 +276,24 @@ pub struct SketchBank {
 	organic: OrganicVibe,
 	audio_sketch: AudioSketch,
 	full_white: FullWhiteSketch,
+	radial_hsv: HsvRadialSketch,
 	active: usize,
 }
 impl SketchBank {
 	pub fn new() -> Self {
-		Self { organic: OrganicVibe::default(), audio_sketch: AudioSketch, full_white: FullWhiteSketch, active: 0 }
+		Self {
+			organic: OrganicVibe::default(),
+			audio_sketch: AudioSketch,
+			full_white: FullWhiteSketch,
+			radial_hsv: HsvRadialSketch,
+			active: 0 }
 	}
 
 	pub fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		match self.active {
 			1 => self.audio_sketch.render(leds, p),
 			2 => self.full_white.render(leds, p),
+			3 => self.radial_hsv.render(leds, p),
 			_ => self.organic.render(leds, p),
 		}
 	}

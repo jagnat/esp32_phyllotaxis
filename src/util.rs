@@ -45,6 +45,12 @@ pub struct Hsv {
 	pub s: f32,
 	pub v: f32,
 }
+impl Hsv {
+
+	pub fn new(h: f32, s: f32, v: f32) -> Hsv {
+		Hsv {h: h, s: s, v: v}
+	}
+}
 
 pub fn hsv_to_rgb_rainbow(hsv: Hsv) -> Rgb {
 	let h = hsv.h;
