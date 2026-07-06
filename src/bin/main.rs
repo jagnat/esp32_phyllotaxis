@@ -133,11 +133,15 @@ async fn main(spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::peripherals::GPIO4<'static>) {
     let rmt = Rmt::new(rmt, Rate::from_mhz(80)).unwrap().into_async();
+    // memsize 4: claim all four TX channels' RAM (192 codes) for channel0. The async driver
+    // refills half the RAM per threshold interrupt, so this stretches the refill deadline
+    // from ~30us to ~120us -- headroom against wake latency while the audio FFT runs.
     let mut channel = rmt.channel0.configure_tx(
         &TxChannelConfig::default()
             .with_clk_divider(1)
             .with_idle_output(true)
-            .with_idle_output_level(Level::Low),
+            .with_idle_output_level(Level::Low)
+            .with_memsize(4),
     ).unwrap().with_pin(pin);
 
     let mut last = Instant::now();
@@ -161,7 +165,10 @@ async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::periphera
 
         encode(led_buf, tx_buf);
 
-        channel.transmit(tx_buf).await.unwrap();
+        // A failed frame is transient; log it rather than panicking the render loop.
+        if let Err(e) = channel.transmit(tx_buf).await {
+            error!("rmt tx err: {}", e);
+        }
         
         Timer::at(next).await;
     }
@@ -199,8 +206,8 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 4 * 4
         fill += n;
 
         while fill >= WINDOW {
-            // DC block: the INMP441 carries a DC offset that leaks into the lowest FFT bin.
-            // Subtract the window mean so band 0 isn't permanently pegged.
+            // DC block: the INMP441 carries a DC offset that leaks into the lowest FFT bins
+            // via the Hamming window's main lobe. Subtract the window mean.
             let mut sum = 0i64;
             for i in 0..512 {
                 sum += decode_left_sample(&stage[..WINDOW], i) as i64;
