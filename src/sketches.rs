@@ -7,7 +7,9 @@ pub struct SketchParams {
 	pub dt: f32,
 	pub t: f32,
 	pub audio: AudioFeatures,
-	pub released: bool, // button released this frame (always false until button task)
+	pub detents: i32,   // encoder movement this frame, signed
+	pub pressed: bool,  // debounced button level
+	pub released: bool, // button released this frame
 }
 
 pub trait Sketch {
@@ -272,11 +274,60 @@ impl Sketch for HsvRadialSketch {
 	}
 }
 
+// Hardware bring-up sketch for the EC11: spin sweeps a ring radially, holding
+// the button floods green, and three fixed LEDs mirror the raw pin levels
+// (red = A, green = B, blue = button) so a dead signal is visible even when
+// the quadrature decode produces nothing.
+pub struct EncoderTestSketch {
+	pos: i32,
+}
+
+impl EncoderTestSketch {
+	// Detents for one full center-to-rim sweep.
+	const SWEEP: i32 = 24;
+}
+
+impl Default for EncoderTestSketch {
+	fn default() -> Self { Self { pos: 0 } }
+}
+
+impl Sketch for EncoderTestSketch {
+	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
+		self.pos += p.detents;
+
+		if p.pressed {
+			for led in leds.iter_mut() { *led = Rgb::new(0, 255, 0); }
+			return;
+		}
+
+		let target = self.pos.rem_euclid(Self::SWEEP) as f32 / Self::SWEEP as f32;
+		for (i, led) in leds.iter_mut().enumerate() {
+			let x = LED_POSITIONS[i][0];
+			let y = LED_POSITIONS[i][1];
+			let r = sqrtf(x * x + y * y);
+
+			// bright cyan ring at the target radius, dim warm fill inside it
+			let d = target - r;
+			let ring = fmaxf(0.0, 1.0 - (if d < 0.0 { -d } else { d }) / 0.12);
+			let fill = if d > 0.0 { 0.15 } else { 0.0 };
+			*led = Rgb::new(0, 0, 0)
+				.lerp(Rgb::new(60, 20, 0), fill / 0.15)
+				.add(Rgb::new(0, 0, 0).lerp(Rgb::new(0, 200, 255), ring * ring));
+		}
+
+		let raw = crate::input::RAW_PINS.load(core::sync::atomic::Ordering::Relaxed);
+		leds[0] = if raw & 0b100 != 0 { Rgb::new(255, 0, 0) } else { Rgb::new(8, 0, 0) };
+		leds[1] = if raw & 0b010 != 0 { Rgb::new(0, 255, 0) } else { Rgb::new(0, 8, 0) };
+		leds[2] = if raw & 0b001 != 0 { Rgb::new(0, 0, 255) } else { Rgb::new(0, 0, 8) };
+	}
+}
+
 pub struct SketchBank {
 	organic: OrganicVibe,
 	audio_sketch: AudioSketch,
 	full_white: FullWhiteSketch,
 	radial_hsv: HsvRadialSketch,
+	encoder_test: EncoderTestSketch,
 	active: usize,
 }
 impl SketchBank {
@@ -286,17 +337,23 @@ impl SketchBank {
 			audio_sketch: AudioSketch,
 			full_white: FullWhiteSketch,
 			radial_hsv: HsvRadialSketch,
-			active: 0 }
+			encoder_test: EncoderTestSketch::default(),
+			active: 4 }
 	}
+
+	const COUNT: usize = 5;
 
 	pub fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		match self.active {
 			1 => self.audio_sketch.render(leds, p),
 			2 => self.full_white.render(leds, p),
 			3 => self.radial_hsv.render(leds, p),
+			4 => self.encoder_test.render(leds, p),
 			_ => self.organic.render(leds, p),
 		}
 	}
 
-	pub fn next(&mut self) { self.active = (self.active + 1) % 2; }
+	pub fn step(&mut self, delta: i32) {
+		self.active = (self.active as i32 + delta).rem_euclid(Self::COUNT as i32) as usize;
+	}
 }

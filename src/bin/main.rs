@@ -11,7 +11,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::dma_buffers;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::gpio::Level;
+use esp_hal::gpio::{Input, InputConfig, Level, Pull};
 use esp_hal::interrupt::Priority;
 use esp_hal::rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator};
 use esp_hal::Async;
@@ -29,6 +29,7 @@ use static_cell::StaticCell;
 use esp32_phyllotaxis::util::*;
 use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::audio::*;
+use esp32_phyllotaxis::input::{encoder_task, BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA};
 
 use esp_println as _;
 use defmt::info;
@@ -123,6 +124,14 @@ async fn main(spawner: Spawner) -> ! {
     // Audio capture + FFT stays on the low-priority thread-mode executor.
     spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
 
+    // EC11: A/B and switch all short to ground, so pull-ups.
+    let pull_up = InputConfig::default().with_pull(Pull::Up);
+    spawner.spawn(unwrap!(encoder_task(
+        Input::new(peripherals.GPIO15, pull_up),
+        Input::new(peripherals.GPIO16, pull_up),
+        Input::new(peripherals.GPIO17, pull_up),
+    )));
+
     loop {
         Timer::after(Duration::from_secs(1)).await;
     }
@@ -159,7 +168,13 @@ async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::periphera
         t += dt;
 
         if let Some(a) = AUDIO.try_take() { last_audio = a; }
-        let params = SketchParams { dt, t, audio: last_audio, released: false };
+
+        let detents = ENCODER_DELTA.swap(0, core::sync::atomic::Ordering::Relaxed);
+        let released = BUTTON_RELEASED.swap(false, core::sync::atomic::Ordering::Relaxed);
+        let pressed = BUTTON_PRESSED.load(core::sync::atomic::Ordering::Relaxed);
+        if released { bank.step(1); }
+
+        let params = SketchParams { dt, t, audio: last_audio, detents, pressed, released };
         bank.render(&mut led_buf, &params);
         apply_gamma(&mut led_buf);
 
