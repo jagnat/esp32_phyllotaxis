@@ -1,7 +1,7 @@
 [package]
 edition      = "2024"
 name         = "esp32_phyllotaxis"
-rust-version = "1.88"
+rust-version = "1.93"
 version      = "0.1.0"
 
 [[bin]]
@@ -11,7 +11,7 @@ path = "./src/bin/main.rs"
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["defmt", "esp32s3", "unstable"] }
 
-esp-rtos = { version = "0.3.0", features = ["defmt", "embassy", "esp32s3"] }
+esp-rtos = { version = "0.3.0", features = ["defmt", "embassy", "esp32s3", "esp-radio", "esp-alloc"] }
 
 defmt                  = "1.0.1"
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["defmt", "esp32s3"] }
@@ -27,6 +27,12 @@ static_cell      = "2.1.1"
 # --- ported DSP core (pure no_std, hardware-agnostic) ---
 microfft = "0.6"
 libm     = "0.2"
+
+# --- wifi + http (phase 0 of member-uploaded sketches) ---
+esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "defmt", "esp-alloc"] }
+esp-alloc = "0.10.0"
+embassy-net = { version = "0.9.1", features = ["defmt", "dhcpv4", "dns", "medium-ethernet", "proto-ipv4", "tcp", "udp"] }
+picoserve = { version = "0.19", features = ["embassy", "defmt"] }
 
 # --- needed for the port (see PORTING.md); versions TBD against esp-hal 1.1 ---
 # esp-hal-smartled is UNUSABLE on esp-hal 1.1: latest (0.17.0) and even git still
@@ -48,3 +54,7 @@ codegen-units = 1     # LLVM can perform better optimizations using a single thr
 debug         = 2     # prefer slower builds but better debugging experience
 lto           = 'fat'
 opt-level     = 's'
+
+[patch.crates-io]
+xtensa-lx-rt = { path = "vendor/xtensa-lx-rt" }
+esp-rtos     = { path = "vendor/esp-rtos" }

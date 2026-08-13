@@ -3,10 +3,6 @@ runner = "espflash flash --monitor --chip esp32s3 --log-format defmt"
 
 [env]
 DEFMT_LOG="info"
-# RMT async TX refills channel RAM from TxFuture::poll; if that code path stalls on a flash
-# cache miss (e.g. audio FFT churning the cache during transmit), the RMT silently retransmits
-# stale RAM mid-frame and corrupts the WS2812 stream. Keep the driver in IRAM.
-ESP_HAL_CONFIG_PLACE_RMT_DRIVER_IN_RAM="true"
 
 [build]
 rustflags = [
@@ -16,4 +12,4 @@ rustflags = [
 target = "xtensa-esp32s3-none-elf"
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]

@@ -356,4 +356,8 @@ impl SketchBank {
 	pub fn step(&mut self, delta: i32) {
 		self.active = (self.active as i32 + delta).rem_euclid(Self::COUNT as i32) as usize;
 	}
+
+	pub fn set(&mut self, idx: usize) {
+		if idx < Self::COUNT { self.active = idx; }
+	}
 }

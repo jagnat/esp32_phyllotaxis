@@ -9,15 +9,13 @@
 
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_buffers;
+use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::gpio::{Input, InputConfig, Level, Pull};
-use esp_hal::interrupt::Priority;
-use esp_hal::rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator};
+use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
 use esp_hal::Async;
 use esp_hal::i2s::master::{Config, I2s, I2sRx};
-
-use esp_rtos::embassy::InterruptExecutor;
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, Instant};
@@ -30,6 +28,7 @@ use esp32_phyllotaxis::util::*;
 use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::audio::*;
 use esp32_phyllotaxis::input::{encoder_task, BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA};
+use esp32_phyllotaxis::net::{self, SKETCH_SELECT};
 
 use esp_println as _;
 use defmt::info;
@@ -46,15 +45,13 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const T0: PulseCode = PulseCode::new(Level::High, 32, Level::Low, 68);
-const T1: PulseCode = PulseCode::new(Level::High, 64, Level::Low, 36);
-
-static TX_BUFFER: StaticCell<[PulseCode; NUM_LEDS * 24 + 1]> = StaticCell::new();
-
-// The LED render runs on a high-priority interrupt executor so its RMT channel-RAM refills
-// preempt the audio FFT. On one cooperative executor, a ~1-2ms FFT starves the ~60us RMT
-// refill deadline and the WS2812 stream underflows mid-frame.
-static RENDER_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+// WS2812 driven over SPI MOSI at 3.2 MHz: each WS2812 bit expands to 4 SPI bits
+// (0 -> 1000 = 312ns high, 1 -> 1100 = 625ns high, 1.25us period). The whole frame
+// streams by DMA, so LED timing is immune to interrupt latency from wifi/FFT.
+const WS_BYTES_PER_LED: usize = 12;
+// >280us of low after the frame latches the LEDs.
+const WS_RESET_BYTES: usize = 120;
+const SPI_FRAME: usize = NUM_LEDS * WS_BYTES_PER_LED + WS_RESET_BYTES;
 
 static AUDIO: Signal<CriticalSectionRawMutex, AudioFeatures> = Signal::new();
 
@@ -66,18 +63,23 @@ fn decode_left_sample(buf: &[u8], i: usize) -> i32 {
     (w as i32) >> 8
 }
 
-fn encode(rgb: [Rgb; NUM_LEDS], tx: &mut [PulseCode; NUM_LEDS * 24 + 1]) {
+fn encode(rgb: &[Rgb; NUM_LEDS], tx: &mut [u8; SPI_FRAME]) {
+    fn expand(bits: u8) -> u8 {
+        let hi = if bits & 2 != 0 { 0b1100 } else { 0b1000 };
+        let lo = if bits & 1 != 0 { 0b1100 } else { 0b1000 };
+        (hi << 4) | lo
+    }
     let mut i = 0;
-    for led in 0..NUM_LEDS {
-        let grb = [rgb[led].g, rgb[led].r, rgb[led].b];
+    for led in rgb {
+        let grb = [led.g, led.r, led.b];
         for byte in grb {
-            for bit in (0..8).rev() {
-                tx[i] = if (byte >> bit) & 1 == 1 { T1 } else { T0 };
+            for pair in (0..4).rev() {
+                tx[i] = expand((byte >> (2 * pair)) & 0b11);
                 i += 1;
             }
         }
     }
-    tx[i] = PulseCode::end_marker();
+    tx[i..].fill(0);
 }
 
 #[allow(
@@ -91,6 +93,8 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+
+    esp_alloc::heap_allocator!(size: 96 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -115,14 +119,26 @@ async fn main(spawner: Spawner) -> ! {
     
     info!("Embassy initialized!");
 
-    // High-priority interrupt executor for the time-critical LED render/RMT refill.
-    // The RMT channel is built inside the task (it's !Send, so it can't cross the SendSpawner).
-    let render_exec = RENDER_EXECUTOR.init(InterruptExecutor::new(sw_interrupt.software_interrupt1));
-    let render_spawner = render_exec.start(Priority::Priority3);
-    render_spawner.spawn(unwrap!(render(peripherals.RMT, peripherals.GPIO4)));
+    let (spi_rx, spi_rx_descs, spi_tx, spi_tx_descs) = dma_buffers!(4, SPI_FRAME);
+    let spi = Spi::new(
+        peripherals.SPI2,
+        SpiConfig::default().with_frequency(Rate::from_hz(3_200_000)),
+    )
+    .unwrap()
+    .with_mosi(peripherals.GPIO4)
+    .with_dma(peripherals.DMA_CH1)
+    .with_buffers(
+        DmaRxBuf::new(spi_rx_descs, spi_rx).unwrap(),
+        DmaTxBuf::new(spi_tx_descs, spi_tx).unwrap(),
+    )
+    .into_async();
 
-    // Audio capture + FFT stays on the low-priority thread-mode executor.
+    spawner.spawn(unwrap!(render(spi)));
     spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
+
+    let rng = esp_hal::rng::Rng::new();
+    let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
+    net::start(spawner, peripherals.WIFI, seed);
 
     // EC11: A/B and switch all short to ground, so pull-ups.
     let pull_up = InputConfig::default().with_pull(Pull::Up);
@@ -140,26 +156,14 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::peripherals::GPIO4<'static>) {
-    let rmt = Rmt::new(rmt, Rate::from_mhz(80)).unwrap().into_async();
-    // memsize 4: claim all four TX channels' RAM (192 codes) for channel0. The async driver
-    // refills half the RAM per threshold interrupt, so this stretches the refill deadline
-    // from ~30us to ~120us -- headroom against wake latency while the audio FFT runs.
-    let mut channel = rmt.channel0.configure_tx(
-        &TxChannelConfig::default()
-            .with_clk_divider(1)
-            .with_idle_output(true)
-            .with_idle_output_level(Level::Low)
-            .with_memsize(4),
-    ).unwrap().with_pin(pin);
-
+async fn render(mut spi: SpiDmaBus<'static, Async>) {
     let mut last = Instant::now();
     let mut t: f32 = 0.0;
     let mut bank = SketchBank::new();
     let mut next = Instant::now();
     let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
     let mut last_audio = AudioFeatures::default();
-    let tx_buf: &'static mut [PulseCode; NUM_LEDS* 24 + 1] = TX_BUFFER.init([PulseCode::end_marker(); NUM_LEDS * 24 + 1]);
+    let mut tx_buf = [0u8; SPI_FRAME];
     loop {
         next += Duration::from_millis(1000/120);
         let now = Instant::now();
@@ -173,16 +177,18 @@ async fn render(rmt: esp_hal::peripherals::RMT<'static>, pin: esp_hal::periphera
         let released = BUTTON_RELEASED.swap(false, core::sync::atomic::Ordering::Relaxed);
         let pressed = BUTTON_PRESSED.load(core::sync::atomic::Ordering::Relaxed);
         if released { bank.step(1); }
+        let selected = SKETCH_SELECT.swap(-1, core::sync::atomic::Ordering::Relaxed);
+        if selected >= 0 { bank.set(selected as usize); }
 
         let params = SketchParams { dt, t, audio: last_audio, detents, pressed, released };
         bank.render(&mut led_buf, &params);
         apply_gamma(&mut led_buf);
 
-        encode(led_buf, tx_buf);
+        encode(&led_buf, &mut tx_buf);
 
         // A failed frame is transient; log it rather than panicking the render loop.
-        if let Err(e) = channel.transmit(tx_buf).await {
-            error!("rmt tx err: {}", e);
+        if let Err(e) = spi.write_async(&tx_buf).await {
+            error!("spi tx err: {}", e);
         }
         
         Timer::at(next).await;
