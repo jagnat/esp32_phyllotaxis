@@ -46,6 +46,7 @@ const HTTP_TASKS: usize = 2;
 static RESOURCES: StaticCell<StackResources<{ HTTP_TASKS + 4 }>> = StaticCell::new();
 static APP: StaticCell<AppRouter<App>> = StaticCell::new();
 static SERVER_CONFIG: StaticCell<picoserve::Config> = StaticCell::new();
+const MANAGE_HTML: &str = include_str!("../web/manage.html");
 
 struct App;
 
@@ -54,6 +55,22 @@ struct Json(String);
 impl Content for Json {
     fn content_type(&self) -> &'static str {
         "application/json"
+    }
+
+    fn content_length(&self) -> usize {
+        self.0.len()
+    }
+
+    async fn write_content<W: Write>(self, mut writer: W) -> Result<(), W::Error> {
+        writer.write_all(self.0.as_bytes()).await
+    }
+}
+
+struct Html(&'static str);
+
+impl Content for Html {
+    fn content_type(&self) -> &'static str {
+        "text/html; charset=utf-8"
     }
 
     fn content_length(&self) -> usize {
@@ -170,6 +187,10 @@ impl AppBuilder for App {
         picoserve::Router::new()
             .route(
                 "/",
+                get(|| async { (StatusCode::OK, Html(MANAGE_HTML)) }),
+            )
+            .route(
+                "/api/info",
                 get(|| async {
                     response(
                         StatusCode::OK,
@@ -368,7 +389,12 @@ pub fn start(
     spawner.spawn(unwrap!(net_runner(runner)));
 
     let app = APP.init(App.build_app());
-    let config = SERVER_CONFIG.init(picoserve::Config::new(picoserve::Timeouts::const_default()));
+    let config = SERVER_CONFIG.init(picoserve::Config::new(picoserve::Timeouts {
+        start_read_request: Duration::from_secs(5),
+        persistent_start_read_request: Duration::from_secs(1),
+        read_request: Duration::from_secs(10),
+        write: Duration::from_secs(10),
+    }));
 
     for id in 0..HTTP_TASKS {
         spawner.spawn(unwrap!(http(id, stack, app, config)));

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Phyllotaxis sketches</title>
+<style>
+  :root { color-scheme: dark; font: 16px/1.4 system-ui, sans-serif; background:#101114; color:#eee; }
+  body { max-width: 850px; margin: 0 auto; padding: 24px; }
+  h1 { margin-bottom: 4px; } h2 { margin-top: 32px; }
+  .muted { color:#aaa; } .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+  label { display:grid; gap:5px; flex:1; min-width:120px; }
+  input, button { font:inherit; border:1px solid #555; border-radius:7px; padding:9px; background:#1c1e23; color:inherit; }
+  button { cursor:pointer; } button:hover { border-color:#b56cff; } button.danger:hover { border-color:#ff5f69; }
+  #drop { margin:16px 0; padding:34px 16px; border:2px dashed #666; border-radius:10px; text-align:center; cursor:pointer; }
+  #drop.over { border-color:#be28ff; background:#25152b; }
+  #status { min-height:24px; margin-top:12px; white-space:pre-wrap; }
+  #status.error { color:#ff8088; } #status.ok { color:#77e0aa; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { padding:9px 6px; border-bottom:1px solid #333; text-align:left; }
+  td.actions { display:flex; gap:6px; } td.actions button { padding:5px 9px; }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:6px; }
+  @media (max-width:600px) { .optional { display:none; } body { padding:16px; } }
+</style>
+
+<h1>Phyllotaxis</h1>
+<div class="muted">WASM sketch manager · <span id="connection">connecting…</span></div>
+
+<h2>Upload a sketch</h2>
+<div id="drop" tabindex="0">Drop a release <strong>.wasm</strong> file here, or click to choose one.</div>
+<input id="file" type="file" accept=".wasm,application/wasm" hidden>
+<div class="row">
+  <label>Slot <input id="slot" type="number" min="0" max="99" value="0"></label>
+  <label>Sketch name <input id="name" maxlength="32" pattern="[A-Za-z0-9._-]+" value="my-sketch"></label>
+  <label>Menu color <input id="color" type="color" value="#be28ff"></label>
+</div>
+<div class="row" style="margin-top:12px">
+  <label>API token <input id="token" type="password" autocomplete="off" placeholder="Required to make changes"></label>
+  <button id="upload">Build first, then upload</button>
+  <button id="main">Return to main sketch</button>
+</div>
+<div id="status" role="status" aria-live="polite"></div>
+
+<h2>Stored sketches</h2>
+<table>
+  <thead><tr><th>Slot</th><th>Name</th><th class="optional">Size</th><th class="optional">Color</th><th>Actions</th></tr></thead>
+  <tbody id="sketches"><tr><td colspan="5">Loading…</td></tr></tbody>
+</table>
+
+<script>
+const $ = id => document.getElementById(id);
+let chosenFile = null;
+
+function message(text, kind = '') {
+  $('status').textContent = text;
+  $('status').className = kind;
+}
+
+function authHeaders(extra = {}) {
+  const token = $('token').value;
+  if (!token) throw new Error('Enter the API token first.');
+  return { Authorization: `Bearer ${token}`, ...extra };
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const text = await response.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { error: text || `HTTP ${response.status}` }; }
+  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+async function refresh() {
+  try {
+    const data = await api('/api/sketches');
+    $('connection').textContent = `${data.sketches.length} of ${data.slot_count} slots used · ABI ${data.abi_version}`;
+    $('sketches').replaceChildren(...(data.sketches.length ? data.sketches.map(row) : [emptyRow()]));
+  } catch (error) {
+    $('connection').textContent = 'offline';
+    message(error.message, 'error');
+  }
+}
+
+function emptyRow() {
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td colspan="5" class="muted">No uploaded sketches.</td>';
+  return tr;
+}
+
+function row(sketch) {
+  const tr = document.createElement('tr');
+  const safeName = document.createTextNode(sketch.name);
+  tr.innerHTML = `<td>${sketch.slot}</td><td></td><td class="optional">${sketch.bytes} B</td>` +
+    `<td class="optional"><span class="swatch" style="background:${sketch.color}"></span>${sketch.color}</td>` +
+    '<td class="actions"></td>';
+  tr.children[1].appendChild(safeName);
+  const run = document.createElement('button');
+  run.textContent = 'Run';
+  run.onclick = () => mutate(`/api/run/${sketch.slot}`, { method:'POST', headers:authHeaders() }, `Running ${sketch.name}.`);
+  const remove = document.createElement('button');
+  remove.textContent = 'Delete'; remove.className = 'danger';
+  remove.onclick = async () => {
+    if (!confirm(`Delete slot ${sketch.slot} (${sketch.name})?`)) return;
+    await mutate(`/api/sketches/${sketch.slot}`, { method:'DELETE', headers:authHeaders() }, `Deleted ${sketch.name}.`);
+    refresh();
+  };
+  tr.querySelector('.actions').append(run, remove);
+  return tr;
+}
+
+async function mutate(path, options, success) {
+  try { await api(path, options); message(success, 'ok'); }
+  catch (error) { message(error.message, 'error'); }
+}
+
+function selectFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.wasm')) return message('Choose a .wasm file.', 'error');
+  chosenFile = file;
+  $('drop').textContent = `${file.name} · ${file.size} bytes`;
+  const inferred = file.name.replace(/\.wasm$/i, '').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 32);
+  if (inferred) $('name').value = inferred;
+  message(file.size <= 32704 ? 'Ready to upload.' : 'File exceeds the 32,704-byte limit.', file.size <= 32704 ? 'ok' : 'error');
+}
+
+$('drop').onclick = () => $('file').click();
+$('drop').onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') $('file').click(); };
+$('file').onchange = event => selectFile(event.target.files[0]);
+$('drop').ondragover = event => { event.preventDefault(); $('drop').classList.add('over'); };
+$('drop').ondragleave = () => $('drop').classList.remove('over');
+$('drop').ondrop = event => { event.preventDefault(); $('drop').classList.remove('over'); selectFile(event.dataTransfer.files[0]); };
+
+$('upload').onclick = async () => {
+  try {
+    if (!chosenFile) throw new Error('Choose a compiled .wasm file first.');
+    if (chosenFile.size > 32704) throw new Error('File exceeds the 32,704-byte limit.');
+    const slot = Number($('slot').value);
+    const name = $('name').value;
+    if (!Number.isInteger(slot) || slot < 0 || slot > 99) throw new Error('Slot must be 0–99.');
+    if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) throw new Error('Name may use letters, digits, dot, underscore, and dash.');
+    message('Uploading and validating…');
+    await api(`/api/sketches/${slot}/${encodeURIComponent(name)}`, {
+      method:'POST',
+      headers:authHeaders({ 'Content-Type':'application/wasm', 'X-Phyllo-Color':$('color').value }),
+      body:chosenFile
+    });
+    message(`Uploaded ${name} to slot ${slot}.`, 'ok');
+    refresh();
+  } catch (error) { message(error.message, 'error'); }
+};
+
+$('main').onclick = () => mutate('/api/select/0', { method:'POST', headers:authHeaders() }, 'Returned to the main sketch.');
+refresh();
+</script>
+</html>
