@@ -25,16 +25,20 @@ source "$config_file"
 : "${PHYLLO_API_TOKEN:?PHYLLO_API_TOKEN is missing}"
 auth_header="Authorization: Bearer ${PHYLLO_API_TOKEN}"
 
+curl_api() {
+    command curl --noproxy '*' --connect-timeout 10 "$@"
+}
+
 private_tmp="$(mktemp -d "${TMPDIR:-/tmp}/phyllo-api-smoke.XXXXXX")"
 uploaded=0
 ran=0
 cleanup() {
     if (( ran )); then
-        curl -sS --max-time 10 -o /dev/null \
+        curl_api -sS --max-time 10 -o /dev/null \
             -X POST -H "$auth_header" "$base_url/api/select/0" || true
     fi
     if (( uploaded )); then
-        curl -sS --max-time 10 -o /dev/null \
+        curl_api -sS --max-time 10 -o /dev/null \
             -X DELETE -H "$auth_header" "$base_url/api/sketches/$smoke_slot" || true
     fi
     unset PHYLLO_SSID PHYLLO_PASS PHYLLO_API_TOKEN auth_header
@@ -53,11 +57,11 @@ expect_status() {
     print "$label: HTTP $actual"
 }
 
-http_status="$(curl -sS --max-time 10 -o "$private_tmp/health.json" -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o "$private_tmp/health.json" -w '%{http_code}' \
     "$base_url/api/health")"
 expect_status health 200 "$http_status"
 
-http_status="$(curl -sS --max-time 10 -o "$private_tmp/list.json" -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o "$private_tmp/list.json" -w '%{http_code}' \
     "$base_url/api/sketches")"
 expect_status list 200 "$http_status"
 if grep -q "\"slot\":${smoke_slot}," "$private_tmp/list.json"; then
@@ -65,25 +69,25 @@ if grep -q "\"slot\":${smoke_slot}," "$private_tmp/list.json"; then
     exit 1
 fi
 
-http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X DELETE "$base_url/api/sketches/$smoke_slot")"
 expect_status unauthenticated-write 401 "$http_status"
 
 print -n 'not a wasm module' >| "$private_tmp/invalid.wasm"
-http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     --data-binary "@$private_tmp/invalid.wasm" \
     "$base_url/api/sketches/$smoke_slot/invalid-smoke")"
 expect_status invalid-module 422 "$http_status"
 
 dd if=/dev/zero of="$private_tmp/oversize.wasm" bs=32705 count=1 2>/dev/null
-http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     --data-binary "@$private_tmp/oversize.wasm" \
     "$base_url/api/sketches/$smoke_slot/oversize-smoke")"
 expect_status oversized-module 413 "$http_status"
 
-http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     -H 'X-Phyllo-Color: #be28ff' \
     --data-binary "@$repo_dir/tools/testmod/testmod.wasm" \
@@ -91,7 +95,7 @@ http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
 expect_status upload 201 "$http_status"
 uploaded=1
 
-http_status="$(curl -sS --max-time 10 -o "$private_tmp/list-after.json" -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o "$private_tmp/list-after.json" -w '%{http_code}' \
     "$base_url/api/sketches")"
 expect_status list-after-upload 200 "$http_status"
 grep -q "\"slot\":${smoke_slot},\"name\":\"private-smoke\"" "$private_tmp/list-after.json" || {
@@ -99,18 +103,18 @@ grep -q "\"slot\":${smoke_slot},\"name\":\"private-smoke\"" "$private_tmp/list-a
     exit 1
 }
 
-http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" "$base_url/api/run/$smoke_slot")"
 expect_status run 202 "$http_status"
 ran=1
 
 sleep 2
-http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" "$base_url/api/select/0")"
 expect_status return-to-main 202 "$http_status"
 ran=0
 
-http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl_api -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X DELETE -H "$auth_header" "$base_url/api/sketches/$smoke_slot")"
 expect_status delete 200 "$http_status"
 uploaded=0

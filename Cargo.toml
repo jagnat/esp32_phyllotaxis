@@ -31,7 +31,7 @@ libm     = "0.2"
 # --- wifi + http (phase 0 of member-uploaded sketches) ---
 esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "defmt", "esp-alloc"] }
 esp-alloc = "0.10.0"
-embassy-net = { version = "0.9.1", features = ["defmt", "dhcpv4", "dns", "medium-ethernet", "proto-ipv4", "tcp", "udp"] }
+embassy-net = { version = "0.9.1", features = ["defmt", "dhcpv4", "dns", "medium-ethernet", "multicast", "proto-ipv4", "tcp", "udp"] }
 picoserve = { version = "0.19", features = ["embassy", "defmt", "ws", "alloc"] }
 
 # --- wasm sketch gallery (phase 2) ---

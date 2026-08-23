@@ -32,10 +32,12 @@ a sanitized serial-monitor session. Exiting the monitor deletes it:
 tools/private_build_flash.zsh --monitor
 ```
 
-After the board reports its DHCP address, run the authenticated API smoke test:
+After the board reports its DHCP address, it also advertises
+`phyllotaxis.local` over mDNS. On networks that allow multicast, either the
+hostname or numeric address can be used:
 
 ```sh
-tools/private_api_smoke.zsh <board-ip>
+tools/private_api_smoke.zsh phyllotaxis.local
 ```
 
 It uses slot 99 only after confirming that the slot is empty. It tests public

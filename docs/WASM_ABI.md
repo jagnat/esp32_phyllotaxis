@@ -76,20 +76,20 @@ and start-function traps are rejected.
 ```sh
 export PHYLLO_TOKEN='<the token compiled into the firmware>'
 
-curl http://<ip>/api/sketches
+curl http://phyllotaxis.local/api/sketches
 
 curl -X POST \
      -H "Authorization: Bearer $PHYLLO_TOKEN" \
      -H 'Content-Type: application/wasm' \
      -H 'X-Phyllo-Color: #be28ff' \
      --data-binary @sketch.wasm \
-     http://<ip>/api/sketches/<slot>/<name>
+     http://phyllotaxis.local/api/sketches/<slot>/<name>
 
 curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://<ip>/api/run/<slot>
+     http://phyllotaxis.local/api/run/<slot>
 
 curl -X DELETE -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://<ip>/api/sketches/<slot>
+     http://phyllotaxis.local/api/sketches/<slot>
 ```
 
 All responses are JSON with meaningful HTTP status codes. Listing is read-only

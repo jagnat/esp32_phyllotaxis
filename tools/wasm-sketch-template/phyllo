@@ -19,7 +19,12 @@ usage() {
 
 command_name=${1:-}
 [ -n "$command_name" ] || usage
-curl_common='--fail-with-body --silent --show-error --connect-timeout 3 --max-time 30'
+
+curl_api() {
+    # Local board traffic must not be routed through a configured HTTP proxy.
+    curl --fail-with-body --silent --show-error --noproxy '*' \
+        --connect-timeout 10 --max-time 30 "$@"
+}
 
 if [ "$command_name" = build ]; then
     cd "$repo_dir"
@@ -52,12 +57,10 @@ slot() {
 
 case "$command_name" in
     list)
-        # shellcheck disable=SC2086 -- intentional expansion into curl flags.
-        curl $curl_common "$base_url/api/sketches"
+        curl_api "$base_url/api/sketches"
         ;;
     health)
-        # shellcheck disable=SC2086
-        curl $curl_common "$base_url/api/health"
+        curl_api "$base_url/api/health"
         ;;
     upload)
         auth
@@ -75,8 +78,7 @@ case "$command_name" in
             printf 'module is too large: %s bytes (maximum 32704)\n' "$bytes" >&2
             exit 1
         fi
-        # shellcheck disable=SC2086
-        curl $curl_common -X POST \
+        curl_api -X POST \
             -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
             -H 'Content-Type: application/wasm' \
             -H "X-Phyllo-Color: $color" \
@@ -86,22 +88,19 @@ case "$command_name" in
     run)
         auth
         slot
-        # shellcheck disable=SC2086
-        curl $curl_common -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+        curl_api -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
             "$base_url/api/run/$PHYLLO_SLOT"
         ;;
     delete)
         auth
         slot
-        # shellcheck disable=SC2086
-        curl $curl_common -X DELETE -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+        curl_api -X DELETE -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
             "$base_url/api/sketches/$PHYLLO_SLOT"
         ;;
     native)
         auth
         native_slot=${2:-0}
-        # shellcheck disable=SC2086
-        curl $curl_common -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+        curl_api -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
             "$base_url/api/select/$native_slot"
         ;;
     *) usage ;;

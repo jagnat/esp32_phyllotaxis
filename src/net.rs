@@ -42,8 +42,8 @@ const API_TOKEN: &str = match option_env!("PHYLLO_API_TOKEN") {
 
 const HTTP_TASKS: usize = 2;
 
-// One socket each for DHCP, DNS, and the DDP UDP listener, plus the HTTP pool.
-static RESOURCES: StaticCell<StackResources<{ HTTP_TASKS + 3 }>> = StaticCell::new();
+// One socket each for DHCP, DNS, DDP, and mDNS, plus the HTTP pool.
+static RESOURCES: StaticCell<StackResources<{ HTTP_TASKS + 4 }>> = StaticCell::new();
 static APP: StaticCell<AppRouter<App>> = StaticCell::new();
 static SERVER_CONFIG: StaticCell<picoserve::Config> = StaticCell::new();
 
@@ -376,6 +376,7 @@ pub fn start(
 
     spawner.spawn(unwrap!(announce(stack)));
     spawner.spawn(unwrap!(crate::stream::ddp_task(stack)));
+    spawner.spawn(unwrap!(crate::mdns::responder(stack)));
 }
 
 #[embassy_executor::task]

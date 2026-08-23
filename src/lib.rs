@@ -21,6 +21,8 @@ pub mod menu;
 pub mod menu_layout;
 pub mod api_security;
 pub mod gallery_format;
+pub mod mdns;
+mod mdns_packet;
 
 pub fn heap_internal_free() -> usize {
     esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())
