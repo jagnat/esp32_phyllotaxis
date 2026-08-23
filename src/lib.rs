@@ -16,6 +16,9 @@ pub mod health;
 pub mod timebase;
 pub mod power;
 pub mod power_math;
+pub mod ui_state;
+pub mod menu;
+pub mod menu_layout;
 
 pub fn heap_internal_free() -> usize {
     esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())

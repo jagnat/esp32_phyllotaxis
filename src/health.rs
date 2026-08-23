@@ -11,6 +11,9 @@ pub static WASM_LOAD_MAX_US: AtomicU32 = AtomicU32::new(0);
 pub static WASM_FRAME_MAX_US: AtomicU32 = AtomicU32::new(0);
 pub static WASM_FRAME_OVERRUNS: AtomicU32 = AtomicU32::new(0);
 pub static ACTIVE_SKETCH: AtomicU32 = AtomicU32::new(0);
+pub static RUNNING_SKETCH: AtomicU32 = AtomicU32::new(0);
+pub static UI_MODE: AtomicU32 = AtomicU32::new(0);
+pub static MENU_CURSOR: AtomicU32 = AtomicU32::new(u32::MAX);
 pub static AUDIO_DMA_POPS: AtomicU32 = AtomicU32::new(0);
 pub static LAST_AUDIO_DMA_MS: AtomicU32 = AtomicU32::new(0);
 pub static AUDIO_CAPTURE_STARTED: AtomicBool = AtomicBool::new(false);
@@ -84,7 +87,8 @@ pub fn json() -> String {
         concat!(
             "{{\"api_version\":2,\"firmware\":\"{}\",",
             "\"uptime_ms\":{},\"reset_reason\":\"{}\",",
-            "\"active_sketch\":{},\"rendered_frames\":{},",
+            "\"active_sketch\":{},\"running_sketch\":{},",
+            "\"ui_mode\":{},\"menu_cursor\":{},\"rendered_frames\":{},",
             "\"missed_frame_deadlines\":{},\"audio_dma_errors\":{},",
             "\"wasm_load_max_us\":{},\"wasm_frame_max_us\":{},",
             "\"wasm_frame_overruns\":{},\"audio_dma_pops\":{},",
@@ -98,6 +102,9 @@ pub fn json() -> String {
         uptime_ms,
         reset_reason_name(),
         ACTIVE_SKETCH.load(Ordering::Relaxed),
+        RUNNING_SKETCH.load(Ordering::Relaxed),
+        UI_MODE.load(Ordering::Relaxed),
+        MENU_CURSOR.load(Ordering::Relaxed),
         RENDERED_FRAMES.load(Ordering::Relaxed),
         MISSED_FRAME_DEADLINES.load(Ordering::Relaxed),
         AUDIO_DMA_ERRORS.load(Ordering::Relaxed),
@@ -120,10 +127,13 @@ pub fn json() -> String {
 pub async fn logger() {
     loop {
         defmt::info!(
-            "health uptime={}s reset={} sketch={} frames={} missed={} audio_errs={} audio_pops={} wasm_load_max={}us wasm_frame_max={}us wasm_overruns={} led={}/{}mA scale={}/1000 heap_int={} heap_ext={}",
+            "health uptime={}s reset={} sketch={} run={} ui={} cursor={} frames={} missed={} audio_errs={} audio_pops={} wasm_load_max={}us wasm_frame_max={}us wasm_overruns={} led={}/{}mA scale={}/1000 heap_int={} heap_ext={}",
             Instant::now().as_secs(),
             reset_reason_name(),
             ACTIVE_SKETCH.load(Ordering::Relaxed),
+            RUNNING_SKETCH.load(Ordering::Relaxed),
+            UI_MODE.load(Ordering::Relaxed),
+            MENU_CURSOR.load(Ordering::Relaxed),
             RENDERED_FRAMES.load(Ordering::Relaxed),
             MISSED_FRAME_DEADLINES.load(Ordering::Relaxed),
             AUDIO_DMA_ERRORS.load(Ordering::Relaxed),

@@ -393,6 +393,19 @@ pub struct SketchBank {
 	active: usize,
 }
 impl SketchBank {
+	pub const DEFAULT_SLOT: usize = 0;
+	pub const COUNT: usize = 7;
+	pub const WASM_SLOT: usize = 6;
+	/// Visitor-facing choices. Power and hardware diagnostics remain remotely
+	/// addressable without appearing in the physical menu.
+	pub const PUBLIC_SLOTS: &'static [usize] = &[0, 1, 3, Self::WASM_SLOT];
+	pub const PUBLIC_COLORS: &'static [Rgb] = &[
+		Rgb::new(255, 110, 10),
+		Rgb::new(70, 255, 80),
+		Rgb::new(0, 210, 255),
+		Rgb::new(190, 40, 255),
+	];
+
 	pub fn new() -> Self {
 		Self {
 			organic: OrganicVibe::default(),
@@ -402,11 +415,8 @@ impl SketchBank {
 			encoder_test: EncoderTestSketch::default(),
 			stream: StreamSketch,
 			wasm: crate::wasm::WasmSketch::default(),
-			active: 0 }
+			active: Self::DEFAULT_SLOT }
 	}
-
-	const COUNT: usize = 7;
-	pub const WASM_SLOT: usize = 6;
 
 	pub fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		match self.active {
@@ -424,10 +434,12 @@ impl SketchBank {
 		self.active
 	}
 
-	/// True while the active sketch is a wasm guest that claimed the encoder
-	/// and button; exiting it then requires the long-press gesture.
+	/// True while the active sketch owns the encoder and button. The hardware
+	/// diagnostics, stream transport, and opted-in wasm guests use a long hold
+	/// as their universal escape gesture.
 	pub fn input_claimed(&self) -> bool {
-		self.active == Self::WASM_SLOT && self.wasm.wants_input()
+		matches!(self.active, 4 | 5)
+			|| (self.active == Self::WASM_SLOT && self.wasm.wants_input())
 	}
 
 	pub fn step(&mut self, delta: i32) {

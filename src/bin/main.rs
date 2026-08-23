@@ -29,6 +29,7 @@ use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::audio::*;
 use esp32_phyllotaxis::input::{encoder_task, BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA};
 use esp32_phyllotaxis::net::{self, SKETCH_SELECT};
+use esp32_phyllotaxis::ui_state::{UiInput, UiMode, UiState};
 
 use esp_println as _;
 use defmt::info;
@@ -181,7 +182,7 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
-const EXIT_HOLD: Duration = Duration::from_secs(5);
+const SCENE_TRANSITION_US: u64 = 250_000;
 #[embassy_executor::task]
 async fn render(
     mut spi: SpiDmaBus<'static, Async>,
@@ -196,8 +197,14 @@ async fn render(
     let mut last_audio = AudioFeatures::default();
     let mut tx_buf = [0u8; SPI_FRAME];
     let mut power_limiter = esp32_phyllotaxis::power::LedPowerLimiter::new();
-    let mut press_start: Option<Instant> = None;
-    let mut swallow_release = false;
+    let mut ui = UiState::new(
+        SketchBank::PUBLIC_SLOTS,
+        SketchBank::COUNT,
+        SketchBank::DEFAULT_SLOT,
+    );
+    let mut last_scene = [Rgb::new(0, 0, 0); NUM_LEDS];
+    let mut transition_from = last_scene;
+    let mut transition_started_us: Option<u64> = None;
     loop {
         if esp32_phyllotaxis::health::audio_dma_stale() {
             error!("audio DMA made no progress for 10s; rebooting");
@@ -223,29 +230,33 @@ async fn render(
         let detents = ENCODER_DELTA.swap(0, core::sync::atomic::Ordering::Relaxed);
         let released = BUTTON_RELEASED.swap(false, core::sync::atomic::Ordering::Relaxed);
         let pressed = BUTTON_PRESSED.load(core::sync::atomic::Ordering::Relaxed);
-
-        // A click steps to the next sketch, unless a wasm guest claimed the
-        // input -- then only holding the button EXIT_HOLD long escapes, and the
-        // release that follows must not step again.
-        if pressed && press_start.is_none() { press_start = Some(now); }
-        if !pressed { press_start = None; }
-        if bank.input_claimed() {
-            if press_start.is_some_and(|t0| now - t0 >= EXIT_HOLD) {
-                bank.step(1);
-                press_start = None;
-                swallow_release = true;
-            }
-        } else if released {
-            if swallow_release {
-                swallow_release = false;
-            } else {
-                bank.step(1);
-            }
-        }
         let selected = SKETCH_SELECT.swap(-1, core::sync::atomic::Ordering::Relaxed);
-        if selected >= 0 { bank.set(selected as usize); }
+        let elapsed_us = (now - started).as_micros();
+        let ui_frame = ui.update(
+            elapsed_us,
+            UiInput { detents, pressed, released },
+            bank.input_claimed(),
+            (selected >= 0).then_some(selected as usize),
+        );
+        if ui_frame.visual_changed {
+            transition_from = last_scene;
+            transition_started_us = Some(elapsed_us);
+        }
+        bank.set(ui_frame.render_slot);
         esp32_phyllotaxis::health::ACTIVE_SKETCH.store(
             bank.active() as u32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        esp32_phyllotaxis::health::RUNNING_SKETCH.store(
+            ui_frame.running_slot as u32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        esp32_phyllotaxis::health::UI_MODE.store(
+            (ui_frame.mode == UiMode::Menu) as u32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        esp32_phyllotaxis::health::MENU_CURSOR.store(
+            ui_frame.menu_cursor.map_or(u32::MAX, |cursor| cursor as u32),
             core::sync::atomic::Ordering::Relaxed,
         );
 
@@ -256,14 +267,34 @@ async fn render(
 
         let params = SketchParams {
             dt_us,
-            elapsed_us: (now - started).as_micros(),
+            elapsed_us,
             frame_index,
             audio: last_audio,
-            detents,
-            pressed,
-            released,
+            detents: ui_frame.sketch_input.detents,
+            pressed: ui_frame.sketch_input.pressed,
+            released: ui_frame.sketch_input.released,
         };
         bank.render(&mut led_buf, &params);
+        if let Some(position) = ui_frame.menu_position {
+            esp32_phyllotaxis::menu::render(
+                &mut led_buf,
+                position,
+                SketchBank::PUBLIC_COLORS,
+                elapsed_us,
+            );
+        }
+        if let Some(transition_start) = transition_started_us {
+            let transition_elapsed = elapsed_us.saturating_sub(transition_start);
+            if esp32_phyllotaxis::menu::crossfade(
+                &mut led_buf,
+                &transition_from,
+                transition_elapsed,
+                SCENE_TRANSITION_US,
+            ) {
+                transition_started_us = None;
+            }
+        }
+        last_scene = led_buf;
         apply_gamma(&mut led_buf);
         power_limiter.apply(&mut led_buf);
 
