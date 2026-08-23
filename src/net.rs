@@ -392,7 +392,7 @@ async fn connection(mut controller: WifiController<'static>) {
     loop {
         match controller.connect_async().await {
             Ok(_) => {
-                info!("wifi connected to {}", SSID);
+                info!("wifi connected");
                 let _ = controller.wait_for_disconnect_async().await;
                 info!("wifi disconnected");
             }
