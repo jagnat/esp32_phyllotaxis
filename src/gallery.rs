@@ -8,26 +8,23 @@ use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions;
 use esp_storage::FlashStorage;
 
-pub const SLOTS: usize = 16;
-pub const SLOT_SIZE: usize = 32 * 1024;
-const HDR_LEN: usize = 64;
-pub const MAX_SKETCH: usize = SLOT_SIZE - HDR_LEN;
-const NAME_LEN: usize = 24;
-const MAGIC: u32 = u32::from_le_bytes(*b"PHYW");
+use crate::gallery_format::{crc32, decode_header, encode_header, Metadata, HEADER_LEN};
 
-// Slot header: magic u32, data len u32, crc32 u32, name bytes (zero-padded),
-// rest of HDR_LEN reserved. Module bytes start at slot + HDR_LEN.
+pub use crate::gallery_format::{MAX_SKETCH, SLOT_SIZE, SLOTS};
 
 #[derive(Clone, Copy)]
 pub struct SlotInfo {
-    name: [u8; NAME_LEN],
+    metadata: Metadata,
     pub len: u32,
+    pub abi_version: u32,
+    pub caps: u32,
+    pub color: [u8; 3],
+    pub format_version: u16,
 }
 
 impl SlotInfo {
     pub fn name(&self) -> &str {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
-        core::str::from_utf8(&self.name[..end]).unwrap_or("<invalid>")
+        self.metadata.name()
     }
 }
 
@@ -83,6 +80,7 @@ pub async fn with<R>(f: impl FnOnce(&mut Gallery) -> R) -> Option<R> {
 pub enum Error {
     BadSlot,
     TooBig,
+    BadName,
     Flash,
 }
 
@@ -92,16 +90,20 @@ impl Gallery {
     }
 
     fn header(&mut self, slot: usize) -> Option<SlotInfo> {
-        let mut hdr = [0u8; HDR_LEN];
-        self.flash.read(self.slot_off(slot), &mut hdr).ok()?;
-        let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-        let len = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
-        if magic != MAGIC || len as usize > MAX_SKETCH {
+        if slot >= SLOTS {
             return None;
         }
-        let mut name = [0u8; NAME_LEN];
-        name.copy_from_slice(&hdr[12..12 + NAME_LEN]);
-        Some(SlotInfo { name, len })
+        let mut header = [0u8; HEADER_LEN];
+        self.flash.read(self.slot_off(slot), &mut header).ok()?;
+        let metadata = decode_header(&header)?;
+        Some(SlotInfo {
+            metadata,
+            len: metadata.len,
+            abi_version: metadata.abi_version,
+            caps: metadata.caps,
+            color: metadata.color,
+            format_version: metadata.format_version,
+        })
     }
 
     pub fn list(&mut self) -> [Option<SlotInfo>; SLOTS] {
@@ -117,38 +119,46 @@ impl Gallery {
             return None;
         }
         let info = self.header(slot)?;
-        let mut hdr = [0u8; HDR_LEN];
-        self.flash.read(self.slot_off(slot), &mut hdr).ok()?;
-        let crc = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
         let mut data = vec![0u8; info.len as usize];
         self.flash
-            .read(self.slot_off(slot) + HDR_LEN as u32, &mut data)
+            .read(self.slot_off(slot) + HEADER_LEN as u32, &mut data)
             .ok()?;
-        if crc32(&data) != crc {
+        if crc32(&data) != info.metadata.crc {
             warn!("gallery: slot {} crc mismatch", slot);
             return None;
         }
         Some(data)
     }
 
-    pub fn write(&mut self, slot: usize, name: &str, data: &[u8]) -> Result<(), Error> {
+    pub fn write(
+        &mut self,
+        slot: usize,
+        name: &str,
+        data: &[u8],
+        caps: u32,
+        color: [u8; 3],
+    ) -> Result<(), Error> {
         if slot >= SLOTS {
             return Err(Error::BadSlot);
         }
         if data.len() > MAX_SKETCH {
             return Err(Error::TooBig);
         }
-        let mut hdr = [0u8; HDR_LEN];
-        hdr[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        hdr[4..8].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        hdr[8..12].copy_from_slice(&crc32(data).to_le_bytes());
-        let name = name.as_bytes();
-        let n = name.len().min(NAME_LEN);
-        hdr[12..12 + n].copy_from_slice(&name[..n]);
+        let header = encode_header(name, data.len(), crc32(data), caps, color)
+            .ok_or(Error::BadName)?;
         let off = self.slot_off(slot);
-        self.flash.write(off, &hdr).map_err(|_| Error::Flash)?;
+
+        // Invalidate first and commit the valid header last. A reset during
+        // either payload write leaves an unreadable slot instead of a valid
+        // header pointing at partial data.
         self.flash
-            .write(off + HDR_LEN as u32, data)
+            .write(off, &[0u8; HEADER_LEN])
+            .map_err(|_| Error::Flash)?;
+        self.flash
+            .write(off + HEADER_LEN as u32, data)
+            .map_err(|_| Error::Flash)?;
+        self.flash
+            .write(off, &header)
             .map_err(|_| Error::Flash)?;
         Ok(())
     }
@@ -157,21 +167,9 @@ impl Gallery {
         if slot >= SLOTS {
             return Err(Error::BadSlot);
         }
-        let zeros = [0u8; HDR_LEN];
+        let zeros = [0u8; HEADER_LEN];
         self.flash
             .write(self.slot_off(slot), &zeros)
             .map_err(|_| Error::Flash)
     }
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }

@@ -23,6 +23,7 @@ pub static AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub const CAP_AUDIO_FEATURES: u32 = 1;
 pub const CAP_WANTS_INPUT: u32 = 4;
+pub const KNOWN_CAPS: u32 = CAP_AUDIO_FEATURES | CAP_WANTS_INPUT;
 
 pub const ABI_VERSION: u32 = 2;
 pub const FRAME_LEN: usize = NUM_LEDS * 3;
@@ -44,11 +45,12 @@ pub const INPUT_LEN: usize = 132;
 
 const AGC_CHANNELS: usize = 16;
 const MAX_GUEST_MEMORY: usize = 1 << 20;
+const MAX_TABLE_ELEMENTS: usize = 1024;
 // Per-render budget; instantiation (data segments, start fn) gets a larger one.
-// wasmi runs ~8.4 fuel/us on this chip, so this caps a frame at ~18ms of
+// wasmi runs ~8.4 fuel/us on this chip, so this caps a frame at ~14ms of
 // execution; the reference demo sketch uses ~52k.
-const FUEL_PER_FRAME: u64 = 150_000;
-const FUEL_FOR_LOAD: u64 = 100_000_000;
+const FUEL_PER_FRAME: u64 = 120_000;
+const FUEL_FOR_LOAD: u64 = 500_000;
 
 pub struct InputFrame<'a> {
     pub dt_us: u32,
@@ -114,37 +116,24 @@ pub enum LoadError {
     NoRender,
     BadAbi,
     BadLayout,
+    BadCapabilities,
 }
 
-/// Parse-and-shape check without instantiating: cheap enough for the upload path.
-pub fn validate(bytes: &[u8]) -> Result<(), LoadError> {
-    let engine = Engine::default();
-    let module = Module::new(&engine, bytes).map_err(|_| LoadError::Invalid)?;
-    let mut memory = false;
-    let mut render = false;
-    let mut abi_version = false;
-    let mut input_ptr = false;
-    let mut frame_ptr = false;
-    for export in module.exports() {
-        match export.name() {
-            "memory" => memory = true,
-            "render" => render = true,
-            "abi_version" => abi_version = true,
-            "input_ptr" => input_ptr = true,
-            "frame_ptr" => frame_ptr = true,
-            _ => {}
-        }
-    }
-    if !memory {
-        return Err(LoadError::NoMemory);
-    }
-    if !(render && abi_version) {
-        return Err(LoadError::NoRender);
-    }
-    if !(input_ptr && frame_ptr) {
-        return Err(LoadError::BadLayout);
-    }
-    Ok(())
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ModuleInfo {
+    pub abi_version: u32,
+    pub caps: u32,
+}
+
+/// Fully instantiate a module under production limits before committing it to
+/// flash. This checks imports, start code, ABI, capabilities, function types,
+/// linear-memory bounds, and exported buffer pointers.
+pub fn validate(bytes: &[u8]) -> Result<ModuleInfo, LoadError> {
+    let instance = SketchInstance::load(bytes, 0x51a7_cafe)?;
+    Ok(ModuleInfo {
+        abi_version: ABI_VERSION,
+        caps: instance.caps,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, defmt::Format)]
@@ -176,6 +165,7 @@ impl SketchInstance {
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(MAX_GUEST_MEMORY)
+            .table_elements(MAX_TABLE_ELEMENTS)
             .memories(1)
             .tables(1)
             .instances(1)
@@ -246,11 +236,20 @@ impl SketchInstance {
             Ok(f) => f.call(&mut store, ()).map_err(|_| LoadError::Instantiate)?,
             Err(_) => 0,
         };
+        if caps & !KNOWN_CAPS != 0 {
+            return Err(LoadError::BadCapabilities);
+        }
         let input_ptr = Self::call_ptr(&instance, &mut store, "input_ptr")?;
         let frame_ptr = Self::call_ptr(&instance, &mut store, "frame_ptr")?;
 
         let mem_size = memory.data_size(&store);
-        if input_ptr as usize + INPUT_LEN > mem_size || frame_ptr as usize + FRAME_LEN > mem_size {
+        let input_end = (input_ptr as usize)
+            .checked_add(INPUT_LEN)
+            .ok_or(LoadError::BadLayout)?;
+        let frame_end = (frame_ptr as usize)
+            .checked_add(FRAME_LEN)
+            .ok_or(LoadError::BadLayout)?;
+        if input_end > mem_size || frame_end > mem_size {
             return Err(LoadError::BadLayout);
         }
 
@@ -352,7 +351,7 @@ pub fn preload_demo() {
     submit_module(DEMO_MODULE.to_vec());
 }
 
-const OVERRUN_LIMIT: u32 = 240;
+const OVERRUN_LIMIT: u32 = 120;
 
 pub struct WasmSketch {
     inst: Option<SketchInstance>,

@@ -60,18 +60,51 @@ Frame buffer: 90 LEDs x 3 bytes RGB. The host gamma-corrects after readback.
 
 - module ≤ 32704 bytes (32KB slot minus header)
 - linear memory ≤ 1MB
-- 150K fuel per frame; overrun skips the frame, ~2s of consecutive overruns
+- 120K fuel per frame; overrun skips the frame, ~2s of consecutive overruns
   disables the sketch ("too slow" red breath)
+- at most one table with at most 1,024 elements
+- load/start/export preflight capped at 500K fuel
+
+The upload path performs the same full instantiation used at run time before
+committing a module to flash. Unknown imports, unknown capability bits, invalid
+function signatures, bad buffer pointers, excessive memory/table declarations,
+and start-function traps are rejected.
 
 ## HTTP API
 
 ```sh
-curl http://<ip>/api/sketches                                  # list slots
-curl -X POST --data-binary @sketch.wasm \
-     http://<ip>/api/sketches/<slot>/<name>                    # upload (validated)
-curl -X POST http://<ip>/api/run/<slot>                        # load + switch to it
-curl -X DELETE http://<ip>/api/sketches/<slot>                 # free a slot
+export PHYLLO_TOKEN='<the token compiled into the firmware>'
+
+curl http://<ip>/api/v2/sketches
+
+curl -X POST \
+     -H "Authorization: Bearer $PHYLLO_TOKEN" \
+     -H 'Content-Type: application/wasm' \
+     -H 'X-Phyllo-Color: #be28ff' \
+     --data-binary @sketch.wasm \
+     http://<ip>/api/v2/sketches/<slot>/<name>
+
+curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
+     http://<ip>/api/v2/run/<slot>
+
+curl -X DELETE -H "Authorization: Bearer $PHYLLO_TOKEN" \
+     http://<ip>/api/v2/sketches/<slot>
 ```
 
-Sketches persist in the `sketches` flash partition (see `partitions.csv`;
-flash once with the new table via `cargo run --release`).
+All responses are JSON with meaningful HTTP status codes. Listing is read-only
+and public. Upload, run, delete, and native sketch selection require
+`Authorization: Bearer <token>`. Write operations are disabled when the
+firmware is built without `PHYLLO_API_TOKEN`, or when the token is shorter than
+16 bytes. HTTP is not encrypted; use this only on a trusted WPA network.
+
+Names are 1–32 ASCII letters, digits, `.`, `_`, or `-`. The optional
+`X-Phyllo-Color` header is a six-digit RGB hex menu color and defaults to
+`#be28ff`.
+
+Sketches persist in 100 fixed 32 KiB slots in the `sketches` flash partition
+(see `partitions.csv`; flash once with the table using `cargo run --release`).
+The v2 header is committed only after the payload is complete and CRC-protected;
+interrupted writes therefore fail closed. Legacy v1 slots remain readable.
+
+Build the Rust example with `cargo build --release` from `tools/testmod/`.
+Debug WASM output is far too large for a slot.

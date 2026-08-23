@@ -10,6 +10,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use picoserve::extract::{FromRequest, FromRequestParts};
+use picoserve::io::{Read, Write};
+use picoserve::request::{RequestBody, RequestParts};
+use picoserve::response::{Content, StatusCode};
 use picoserve::routing::{delete, get, parse_path_segment, post};
 use picoserve::{AppBuilder, AppRouter};
 use static_cell::StaticCell;
@@ -31,6 +35,10 @@ const PASSWORD: &str = match option_env!("PHYLLO_PASS") {
     Some(s) => s,
     None => "",
 };
+const API_TOKEN: &str = match option_env!("PHYLLO_API_TOKEN") {
+    Some(s) => s,
+    None => "",
+};
 
 const HTTP_TASKS: usize = 2;
 
@@ -41,6 +49,120 @@ static SERVER_CONFIG: StaticCell<picoserve::Config> = StaticCell::new();
 
 struct App;
 
+struct Json(String);
+
+impl Content for Json {
+    fn content_type(&self) -> &'static str {
+        "application/json"
+    }
+
+    fn content_length(&self) -> usize {
+        self.0.len()
+    }
+
+    async fn write_content<W: Write>(self, mut writer: W) -> Result<(), W::Error> {
+        writer.write_all(self.0.as_bytes()).await
+    }
+}
+
+type ApiResponse = (StatusCode, Json);
+
+fn response(status: StatusCode, body: String) -> ApiResponse {
+    (status, Json(body))
+}
+
+fn error_response(status: StatusCode, code: &str) -> ApiResponse {
+    response(status, format!("{{\"ok\":false,\"error\":\"{}\"}}\n", code))
+}
+
+fn write_api_enabled() -> bool {
+    API_TOKEN.len() >= 16
+}
+
+struct ApiAuth;
+
+impl<'r, State> FromRequestParts<'r, State> for ApiAuth {
+    type Rejection = ApiResponse;
+
+    async fn from_request_parts(
+        _state: &'r State,
+        request_parts: &RequestParts<'r>,
+    ) -> Result<Self, Self::Rejection> {
+        if !write_api_enabled() {
+            return Err(error_response(StatusCode::SERVICE_UNAVAILABLE, "write_api_disabled"));
+        }
+        let authorization = request_parts
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.as_str().ok())
+            .unwrap_or("");
+        if crate::api_security::bearer_matches(API_TOKEN, authorization) {
+            Ok(Self)
+        } else {
+            Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized"))
+        }
+    }
+}
+
+struct MenuColor([u8; 3]);
+
+impl<'r, State> FromRequestParts<'r, State> for MenuColor {
+    type Rejection = ApiResponse;
+
+    async fn from_request_parts(
+        _state: &'r State,
+        request_parts: &RequestParts<'r>,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(value) = request_parts.headers().get("x-phyllo-color") else {
+            return Ok(Self(crate::api_security::DEFAULT_MENU_COLOR));
+        };
+        let value = value
+            .as_str()
+            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "invalid_color"))?;
+        crate::api_security::parse_hex_color(value)
+            .map(Self)
+            .ok_or_else(|| error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_color"))
+    }
+}
+
+struct SketchBody(Vec<u8>);
+
+impl<'r, State> FromRequest<'r, State> for SketchBody {
+    type Rejection = ApiResponse;
+
+    async fn from_request<R: Read>(
+        _state: &'r State,
+        request_parts: RequestParts<'r>,
+        request_body: RequestBody<'r, R>,
+    ) -> Result<Self, Self::Rejection> {
+        let content_type = request_parts
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.as_str().ok())
+            .unwrap_or("");
+        if !matches!(content_type, "application/wasm" | "application/octet-stream") {
+            return Err(error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "expected_wasm_content_type",
+            ));
+        }
+        let len = request_body.content_length();
+        if len > crate::gallery::MAX_SKETCH {
+            return Err(error_response(StatusCode::PAYLOAD_TOO_LARGE, "module_too_large"));
+        }
+        let mut body = Vec::new();
+        body.try_reserve_exact(len)
+            .map_err(|_| error_response(StatusCode::INSUFFICIENT_STORAGE, "out_of_memory"))?;
+        body.resize(len, 0);
+        request_body
+            .reader()
+            .read_exact(&mut body)
+            .await
+            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "incomplete_body"))?;
+        Ok(Self(body))
+    }
+}
+
 impl AppBuilder for App {
     type PathRouter = impl picoserve::routing::PathRouter;
 
@@ -48,15 +170,23 @@ impl AppBuilder for App {
         picoserve::Router::new()
             .route(
                 "/",
-                get(|| async { "phyllotaxis: alive\n" }),
-            )
-            .route("/api/v2/health", get(|| async { crate::health::json() }))
-            .route(
-                ("/api/select", parse_path_segment::<u32>()),
-                post(|idx: u32| async move {
-                    SKETCH_SELECT.store(idx as i32, Ordering::Relaxed);
-                    "ok\n"
+                get(|| async {
+                    response(
+                        StatusCode::OK,
+                        format!(
+                            "{{\"name\":\"phyllotaxis\",\"api_version\":2,\"write_enabled\":{}}}\n",
+                            write_api_enabled()
+                        ),
+                    )
                 }),
+            )
+            .route(
+                "/api/v2/health",
+                get(|| async { response(StatusCode::OK, crate::health::json()) }),
+            )
+            .route(
+                ("/api/v2/select", parse_path_segment::<usize>()),
+                post(select_sketch),
             )
             .route(
                 "/stream",
@@ -64,86 +194,142 @@ impl AppBuilder for App {
                     ws.on_upgrade(crate::stream::WsStream)
                 }),
             )
-            .route("/api/sketches", get(sketches_list))
+            .route("/api/v2/sketches", get(sketches_list))
             .route(
                 (
-                    "/api/sketches",
+                    "/api/v2/sketches",
                     parse_path_segment::<usize>(),
                     parse_path_segment::<String>(),
                 ),
                 post(sketches_upload),
             )
             .route(
-                ("/api/sketches", parse_path_segment::<usize>()),
+                ("/api/v2/sketches", parse_path_segment::<usize>()),
                 delete(sketches_delete),
             )
             .route(
-                ("/api/run", parse_path_segment::<usize>()),
+                ("/api/v2/run", parse_path_segment::<usize>()),
                 post(sketches_run),
             )
     }
 }
 
-async fn sketches_list() -> String {
+async fn select_sketch(slot: usize, _auth: ApiAuth) -> ApiResponse {
+    if slot >= crate::sketches::SketchBank::COUNT {
+        return error_response(StatusCode::NOT_FOUND, "unknown_native_slot");
+    }
+    SKETCH_SELECT.store(slot as i32, Ordering::Relaxed);
+    response(StatusCode::ACCEPTED, format!("{{\"ok\":true,\"slot\":{}}}\n", slot))
+}
+
+async fn sketches_list() -> ApiResponse {
     use core::fmt::Write;
     match crate::gallery::with(|g| g.list()).await {
         Some(slots) => {
             let mut out = String::new();
+            let _ = write!(
+                out,
+                "{{\"api_version\":2,\"abi_version\":{},\"slot_count\":{},\"slot_size\":{},\"max_module_size\":{},\"write_enabled\":{},\"sketches\":[",
+                crate::wasm::ABI_VERSION,
+                crate::gallery::SLOTS,
+                crate::gallery::SLOT_SIZE,
+                crate::gallery::MAX_SKETCH,
+                write_api_enabled(),
+            );
+            let mut first = true;
             for (i, slot) in slots.iter().enumerate() {
                 if let Some(s) = slot {
-                    let _ = writeln!(out, "{} {} {}", i, s.name(), s.len);
+                    if !first {
+                        out.push(',');
+                    }
+                    first = false;
+                    let _ = write!(
+                        out,
+                        "{{\"slot\":{},\"name\":\"{}\",\"bytes\":{},\"abi_version\":{},\"caps\":{},\"color\":\"#{:02x}{:02x}{:02x}\",\"format_version\":{}}}",
+                        i,
+                        s.name(),
+                        s.len,
+                        s.abi_version,
+                        s.caps,
+                        s.color[0],
+                        s.color[1],
+                        s.color[2],
+                        s.format_version,
+                    );
                 }
             }
-            if out.is_empty() {
-                out.push_str("(no sketches)\n");
-            }
-            out
+            out.push_str("]}\n");
+            response(StatusCode::OK, out)
         }
-        None => String::from("no sketches partition\n"),
+        None => error_response(StatusCode::SERVICE_UNAVAILABLE, "gallery_unavailable"),
     }
 }
 
-async fn sketches_upload((slot, name): (usize, String), body: Vec<u8>) -> String {
+async fn sketches_upload(
+    (slot, name): (usize, String),
+    _auth: ApiAuth,
+    MenuColor(color): MenuColor,
+    SketchBody(body): SketchBody,
+) -> ApiResponse {
     if slot >= crate::gallery::SLOTS {
-        return format!("bad slot (0..{})\n", crate::gallery::SLOTS - 1);
+        return error_response(StatusCode::NOT_FOUND, "unknown_slot");
     }
-    if body.len() > crate::gallery::MAX_SKETCH {
-        return format!(
-            "too big: {} > {} bytes\n",
-            body.len(),
-            crate::gallery::MAX_SKETCH
-        );
+    if !crate::api_security::valid_name(&name) {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_name");
     }
-    if let Err(e) = crate::wasm::validate(&body) {
-        return format!("invalid module: {:?}\n", e);
-    }
-    match crate::gallery::with(|g| g.write(slot, &name, &body)).await {
-        Some(Ok(())) => format!("ok: slot {} <- {} ({} bytes)\n", slot, name, body.len()),
-        Some(Err(e)) => format!("flash write failed: {:?}\n", e),
-        None => String::from("no sketches partition\n"),
+    let info = match crate::wasm::validate(&body) {
+        Ok(info) => info,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_module"),
+    };
+    match crate::gallery::with(|g| g.write(slot, &name, &body, info.caps, color)).await {
+        Some(Ok(())) => response(
+            StatusCode::CREATED,
+            format!(
+                "{{\"ok\":true,\"slot\":{},\"name\":\"{}\",\"bytes\":{},\"abi_version\":{},\"caps\":{},\"color\":\"#{:02x}{:02x}{:02x}\"}}\n",
+                slot,
+                name,
+                body.len(),
+                info.abi_version,
+                info.caps,
+                color[0],
+                color[1],
+                color[2],
+            ),
+        ),
+        Some(Err(_)) => error_response(StatusCode::INSUFFICIENT_STORAGE, "flash_write_failed"),
+        None => error_response(StatusCode::SERVICE_UNAVAILABLE, "gallery_unavailable"),
     }
 }
 
-async fn sketches_delete(slot: usize) -> String {
+async fn sketches_delete(slot: usize, _auth: ApiAuth) -> ApiResponse {
+    if slot >= crate::gallery::SLOTS {
+        return error_response(StatusCode::NOT_FOUND, "unknown_slot");
+    }
     match crate::gallery::with(|g| g.erase(slot)).await {
-        Some(Ok(())) => String::from("ok\n"),
-        Some(Err(e)) => format!("delete failed: {:?}\n", e),
-        None => String::from("no sketches partition\n"),
+        Some(Ok(())) => response(StatusCode::OK, format!("{{\"ok\":true,\"slot\":{}}}\n", slot)),
+        Some(Err(_)) => error_response(StatusCode::INSUFFICIENT_STORAGE, "flash_erase_failed"),
+        None => error_response(StatusCode::SERVICE_UNAVAILABLE, "gallery_unavailable"),
     }
 }
 
-async fn sketches_run(slot: usize) -> String {
+async fn sketches_run(slot: usize, _auth: ApiAuth) -> ApiResponse {
+    if slot >= crate::gallery::SLOTS {
+        return error_response(StatusCode::NOT_FOUND, "unknown_slot");
+    }
     match crate::gallery::with(|g| g.read(slot)).await {
         Some(Some(bytes)) => {
+            if crate::wasm::validate(&bytes).is_err() {
+                return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_module");
+            }
             crate::wasm::submit_module(bytes);
             SKETCH_SELECT.store(
                 crate::sketches::SketchBank::WASM_SLOT as i32,
                 Ordering::Relaxed,
             );
-            String::from("ok\n")
+            response(StatusCode::ACCEPTED, format!("{{\"ok\":true,\"slot\":{}}}\n", slot))
         }
-        Some(None) => String::from("empty slot\n"),
-        None => String::from("no sketches partition\n"),
+        Some(None) => error_response(StatusCode::NOT_FOUND, "empty_or_corrupt_slot"),
+        None => error_response(StatusCode::SERVICE_UNAVAILABLE, "gallery_unavailable"),
     }
 }
 
@@ -152,6 +338,11 @@ pub fn start(
     wifi: esp_hal::peripherals::WIFI<'static>,
     seed: u64,
 ) {
+    if write_api_enabled() {
+        info!("api: authenticated mutations enabled");
+    } else {
+        info!("api: mutations disabled (set PHYLLO_API_TOKEN to 16+ bytes)");
+    }
     if SSID.is_empty() {
         info!("no PHYLLO_SSID set at build time; wifi disabled");
         return;

@@ -19,6 +19,8 @@ pub mod power_math;
 pub mod ui_state;
 pub mod menu;
 pub mod menu_layout;
+pub mod api_security;
+pub mod gallery_format;
 
 pub fn heap_internal_free() -> usize {
     esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())

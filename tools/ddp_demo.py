@@ -2,7 +2,9 @@
 """Stream a test pattern to the board over DDP and print telemetry replies.
 
 Usage: ./ddp_demo.py <board-ip>
-Select the stream slot first: curl -X POST http://<board-ip>/api/select/5
+Select the stream slot first (write API token required):
+  curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
+       http://<board-ip>/api/v2/select/5
 """
 import math
 import select
