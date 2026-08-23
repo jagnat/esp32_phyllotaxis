@@ -50,6 +50,7 @@ impl AppBuilder for App {
                 "/",
                 get(|| async { "phyllotaxis: alive\n" }),
             )
+            .route("/api/v2/health", get(|| async { crate::health::json() }))
             .route(
                 ("/api/select", parse_path_segment::<u32>()),
                 post(|idx: u32| async move {

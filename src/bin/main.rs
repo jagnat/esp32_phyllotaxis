@@ -93,6 +93,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    esp32_phyllotaxis::health::init(esp_hal::system::reset_reason());
 
     // PSRAM region is registered first so unconstrained allocations (wasmi's
     // module code, stacks, guest linear memory) land in external RAM; the
@@ -110,6 +111,7 @@ async fn main(spawner: Spawner) -> ! {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    spawner.spawn(unwrap!(esp32_phyllotaxis::health::logger()));
 
     // The spike blocks this executor for longer than the i2s DMA ring buffers,
     // and an overrun wedges the circular transfer for good (no restart API in
@@ -222,6 +224,10 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         }
         let selected = SKETCH_SELECT.swap(-1, core::sync::atomic::Ordering::Relaxed);
         if selected >= 0 { bank.set(selected as usize); }
+        esp32_phyllotaxis::health::ACTIVE_SKETCH.store(
+            bank.active() as u32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
 
         // Only the wasm sketch may park the audio pipeline, and only while active.
         if bank.active() != SketchBank::WASM_SLOT {
@@ -238,11 +244,21 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         if let Err(e) = spi.write_async(&tx_buf).await {
             error!("spi tx err: {}", e);
         }
+        esp32_phyllotaxis::health::RENDERED_FRAMES.fetch_add(
+            1,
+            core::sync::atomic::Ordering::Relaxed,
+        );
 
         Timer::at(next).await;
         // Waking late means the executor was starved -- whatever caused it is
         // also what overruns the i2s ring.
         let lag = Instant::now() - next;
+        if lag > Duration::from_millis(1000 / 120) {
+            esp32_phyllotaxis::health::MISSED_FRAME_DEADLINES.fetch_add(
+                1,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
         if lag > Duration::from_millis(50) {
             defmt::warn!("render stalled {}ms", lag.as_millis());
             next = Instant::now();
@@ -296,6 +312,10 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4
                 // case a future update makes it recoverable.
                 if !err_logged {
                     error!("i2s pop err: {} (audio disabled until reboot)", e);
+                    esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
+                        1,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     err_logged = true;
                 }
                 fill = 0;

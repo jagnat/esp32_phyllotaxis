@@ -396,7 +396,13 @@ impl Sketch for WasmSketch {
     fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
         if let Some(bytes) = PENDING.lock(|pending| pending.borrow_mut().take()) {
             let seed = p.t.to_bits() ^ input::ENCODER_POS.load(Ordering::Relaxed) as u32;
-            match SketchInstance::load(&bytes, seed) {
+            let load_started = Instant::now();
+            let loaded = SketchInstance::load(&bytes, seed);
+            crate::health::record_max(
+                &crate::health::WASM_LOAD_MAX_US,
+                load_started.elapsed().as_micros(),
+            );
+            match loaded {
                 Ok(inst) => {
                     info!("wasm: loaded module ({} bytes, caps {:#x})", bytes.len(), inst.caps);
                     self.inst = Some(inst);
@@ -438,9 +444,16 @@ impl Sketch for WasmSketch {
             audio: &p.audio,
             bins: None,
         };
-        match inst.run_frame(&frame, &mut self.frame, false) {
+        let frame_started = Instant::now();
+        let result = inst.run_frame(&frame, &mut self.frame, false);
+        crate::health::record_max(
+            &crate::health::WASM_FRAME_MAX_US,
+            frame_started.elapsed().as_micros(),
+        );
+        match result {
             Ok(()) => self.overruns = 0,
             Err(FrameError::Overrun) => {
+                crate::health::WASM_FRAME_OVERRUNS.fetch_add(1, Ordering::Relaxed);
                 self.overruns += 1;
                 if self.overruns >= OVERRUN_LIMIT {
                     warn!("wasm: sketch too slow, disabling");

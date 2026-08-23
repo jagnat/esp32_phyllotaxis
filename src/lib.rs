@@ -12,6 +12,11 @@ pub mod net;
 pub mod stream;
 pub mod wasm;
 pub mod gallery;
+pub mod health;
+
+pub fn heap_internal_free() -> usize {
+    esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())
+}
 
 pub fn heap_external_free() -> usize {
     esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::External.into())
