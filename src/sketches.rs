@@ -4,12 +4,23 @@ use core::f32::consts::TAU;
 use libm::{atan2f, fmaxf, fmodf, powf, sinf, sqrtf};
 
 pub struct SketchParams {
-	pub dt: f32,
-	pub t: f32,
+	pub dt_us: u32,
+	pub elapsed_us: u64,
+	pub frame_index: u64,
 	pub audio: AudioFeatures,
 	pub detents: i32,   // encoder movement this frame, signed
 	pub pressed: bool,  // debounced button level
 	pub released: bool, // button released this frame
+}
+
+impl SketchParams {
+	pub fn dt_seconds(&self) -> f32 {
+		crate::timebase::dt_seconds(self.dt_us)
+	}
+
+	pub fn phase_radians(&self, period_us: u64) -> f32 {
+		crate::timebase::phase_radians(self.elapsed_us, period_us)
+	}
 }
 
 pub trait Sketch {
@@ -83,7 +94,7 @@ pub struct OrganicVibe {
 	pulse_phase: f32,
 	rot_dir: f32,
 	color_phase: f32,
-	circle_direction_timer: f32,
+	circle_direction_elapsed_us: u64,
 	glint_color_idx: usize,
 	glint_seed: f32,
 	glint_level: f32,
@@ -92,13 +103,25 @@ pub struct OrganicVibe {
 	current_palette: Palette,
 	current_palette_idx: usize,
 	target_palette_idx: usize,
-	palette_transition: f32,
-	palette_timer: f32,
-	pulse_dir_timer: f32,
+	palette_transition_elapsed_us: u64,
+	palette_elapsed_us: u64,
+	pulse_dir_elapsed_us: u64,
 	pulse_dir: f32,
-	show_spiral: f32,
-	show_spiral_accum: f32,
+	spiral_level: f32,
+	spiral_state: SpiralState,
 	rng: Rng,
+}
+
+#[derive(Clone, Copy)]
+enum SpiralState { Rising, Falling }
+
+const CIRCLE_DIRECTION_US: u64 = 30_000_000;
+const PULSE_DIRECTION_US: u64 = 37_000_000;
+const PALETTE_HOLD_US: u64 = 100_000_000;
+const PALETTE_TRANSITION_US: u64 = 20_000_000;
+
+fn wrap_phase(value: f32) -> f32 {
+	crate::timebase::wrap_radians(value)
 }
 
 impl Default for OrganicVibe {
@@ -107,7 +130,7 @@ impl Default for OrganicVibe {
 			pulse_phase: 0.0,
 			rot_dir: 1.0,
 			color_phase: 0.0,
-			circle_direction_timer: 0.0,
+			circle_direction_elapsed_us: 0,
 			glint_color_idx: 0,
 			glint_seed: 0.0,
 			glint_level: 0.0,
@@ -116,12 +139,12 @@ impl Default for OrganicVibe {
 			current_palette: PALETTES[0],
 			current_palette_idx: 0,
 			target_palette_idx: 0,
-			palette_transition: 1.0,
-			palette_timer: 0.0,
-			pulse_dir_timer: 0.0,
+			palette_transition_elapsed_us: PALETTE_TRANSITION_US,
+			palette_elapsed_us: 0,
+			pulse_dir_elapsed_us: 0,
 			pulse_dir: 1.0,
-			show_spiral: 0.0,
-			show_spiral_accum: 0.0003,
+			spiral_level: 0.0,
+			spiral_state: SpiralState::Rising,
 			rng: Rng::new(0x1337_beef),
 		}
 	}
@@ -129,33 +152,36 @@ impl Default for OrganicVibe {
 
 impl Sketch for OrganicVibe {
 	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		let dt = p.dt;
+		let dt = p.dt_seconds();
+		let dt_us = p.dt_us as u64;
 		let a = &p.audio;
 
-		self.circle_direction_timer += dt;
-		if self.circle_direction_timer > 30.0 {
+		self.circle_direction_elapsed_us += dt_us;
+		if self.circle_direction_elapsed_us >= CIRCLE_DIRECTION_US {
 			if self.rng.below(10) > 5 { self.rot_dir *= -1.0; }
-			self.circle_direction_timer = 0.0;
+			self.circle_direction_elapsed_us -= CIRCLE_DIRECTION_US;
 		}
 
-		self.pulse_dir_timer += dt;
-		if self.pulse_dir_timer > 37.0 {
-			self.pulse_dir_timer = 0.0;
-			self.pulse_dir = if self.rng.below(10) > 9 { -1.0 } else { 1.0 };
+		self.pulse_dir_elapsed_us += dt_us;
+		if self.pulse_dir_elapsed_us >= PULSE_DIRECTION_US {
+			self.pulse_dir_elapsed_us -= PULSE_DIRECTION_US;
+			self.pulse_dir = if self.rng.below(10) == 9 { -1.0 } else { 1.0 };
 		}
 
-		self.palette_timer += dt;
-		self.palette_transition += dt * 0.05;
-		if self.palette_timer > 100.0 || p.released {
+		self.palette_elapsed_us += dt_us;
+		self.palette_transition_elapsed_us = self.palette_transition_elapsed_us
+			.saturating_add(dt_us)
+			.min(PALETTE_TRANSITION_US);
+		if self.palette_elapsed_us >= PALETTE_HOLD_US || p.released {
 			if p.released { self.pulse_dir = -1.0; }
-			self.palette_timer = 0.0;
+			self.palette_elapsed_us = 0;
 			self.target_palette_idx = next_palette(&mut self.rng, self.current_palette_idx);
-			self.palette_transition = 0.0;
+			self.palette_transition_elapsed_us = 0;
 		}
 
 		// blend toward the target palette
-		if self.palette_transition < 1.0 {
-			let pt = self.palette_transition;
+		if self.palette_transition_elapsed_us < PALETTE_TRANSITION_US {
+			let pt = self.palette_transition_elapsed_us as f32 / PALETTE_TRANSITION_US as f32;
 			let s = pt * pt * (3.0 - 2.0 * pt);
 			let cur = &PALETTES[self.current_palette_idx];
 			let tgt = &PALETTES[self.target_palette_idx];
@@ -167,17 +193,28 @@ impl Sketch for OrganicVibe {
 			self.current_palette = PALETTES[self.current_palette_idx];
 		}
 
-		// spiral undulates regardless of audio
-		self.show_spiral += self.show_spiral_accum;
-		if self.show_spiral > 0.6 { self.show_spiral_accum = -0.001; }
-		if self.show_spiral < 0.0 { self.show_spiral_accum = 0.0003; }
+		// Preserve the old 120fps rates, but advance from elapsed time.
+		match self.spiral_state {
+			SpiralState::Rising => {
+				self.spiral_level += 0.036 * dt;
+				if self.spiral_level >= 0.6 {
+					self.spiral_level = 0.6;
+					self.spiral_state = SpiralState::Falling;
+				}
+			}
+			SpiralState::Falling => {
+				self.spiral_level -= 0.12 * dt;
+				if self.spiral_level <= 0.0 {
+					self.spiral_level = 0.0;
+					self.spiral_state = SpiralState::Rising;
+				}
+			}
+		}
 
 		// audio-reactive speeds
-		self.pulse_phase += self.pulse_dir * dt * 0.6 * (0.1 + (a.sustain[0] * 2.0 + a.transients[0] * 2.0));
-		self.color_phase += dt * 0.2 * self.rot_dir;
-		self.color_phase = fmodf(self.color_phase, TAU);
-		if self.color_phase < 0.0 { self.color_phase += TAU; }
-		self.ambient_phase += dt * 0.04;
+		self.pulse_phase = wrap_phase(self.pulse_phase + self.pulse_dir * dt * 0.6 * (0.1 + (a.sustain[0] * 2.0 + a.transients[0] * 2.0)));
+		self.color_phase = wrap_phase(self.color_phase + dt * 0.2 * self.rot_dir);
+		self.ambient_phase = wrap_phase(self.ambient_phase + dt * 0.04);
 
 		// trigger glints on high-band transients
 		let hi_transient = 2.0 * fmaxf(0.6 * a.transients[4], a.transients[5]);
@@ -190,7 +227,7 @@ impl Sketch for OrganicVibe {
 			self.glint_color_idx = self.rng.below(NUM_GLINT_COLORS as u32) as usize;
 			self.glint_seed = self.rng.below(1000) as f32 * 0.1337;
 		} else {
-			self.glint_level *= 0.994;
+			self.glint_level *= powf(0.994, dt * 120.0);
 		}
 		if self.glint_level < 0.0001 { self.glint_level = 0.0; }
 
@@ -215,7 +252,7 @@ impl Sketch for OrganicVibe {
 			let warped_theta = theta_rotating - r * twist_factor;
 			let shell_wave = powf((sinf(7.0 * warped_theta) + 1.0) * 0.5, 3.0);
 			let mut shell_color = Rgb::new(180, 0, 110).lerp(Rgb::new(0, 80, 20), pulse_intensity);
-			shell_color = Rgb::new(0, 0, 0).lerp(shell_color, fmaxf(self.show_spiral, a.super_sustain[2]));
+			shell_color = Rgb::new(0, 0, 0).lerp(shell_color, fmaxf(self.spiral_level, a.super_sustain[2]));
 			shell_color = Rgb::new(0, 0, 0).lerp(shell_color, shell_wave);
 			final_c = shell_color.add(final_c);
 
@@ -251,8 +288,8 @@ impl Sketch for AudioSketch {
 
 pub struct FullWhiteSketch;
 impl Sketch for FullWhiteSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		for (i, led) in  leds.iter_mut().enumerate() {
+	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], _p: &SketchParams) {
+		for led in leds.iter_mut() {
 			{ *led = Rgb{r: 255, g: 255, b: 255} };
 		}
 	}
@@ -267,7 +304,8 @@ impl Sketch for HsvRadialSketch {
 
 			let theta = atan2f(y, x);
 
-			let hue = fmodf((theta / 3.14159) * 180.0 + 180.0 + p.t * 32.0, 360.0);
+			let time_hue = crate::timebase::phase_degrees(p.elapsed_us, 11_250_000);
+			let hue = fmodf((theta / 3.14159) * 180.0 + 180.0 + time_hue, 360.0);
 			let color = Hsv::new(hue, 1.0, 1.0);
 			*led = hsv_to_rgb_rainbow(color);
 		}
@@ -335,7 +373,7 @@ impl Sketch for StreamSketch {
 				}
 			});
 		} else {
-			let breath = (sinf(p.t * 1.5) + 1.0) * 0.5;
+			let breath = (sinf(p.phase_radians(4_188_790)) + 1.0) * 0.5;
 			let v = (10.0 + 25.0 * breath) as u8;
 			for led in leds.iter_mut() {
 				*led = Rgb::new(0, v, v);
@@ -364,7 +402,9 @@ impl SketchBank {
 			encoder_test: EncoderTestSketch::default(),
 			stream: StreamSketch,
 			wasm: crate::wasm::WasmSketch::default(),
-			active: 4 }
+			// Temporary bring-up default: boot directly into the bundled WASM
+			// cadence test. The production state machine will replace this.
+			active: Self::WASM_SLOT }
 	}
 
 	const COUNT: usize = 7;

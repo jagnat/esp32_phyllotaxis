@@ -13,6 +13,7 @@ pub mod stream;
 pub mod wasm;
 pub mod gallery;
 pub mod health;
+pub mod timebase;
 
 pub fn heap_internal_free() -> usize {
     esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())

@@ -131,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.DMA_CH0,
         Config::new_tdm_philips().with_sample_rate(Rate::from_hz(32000)).with_data_format(esp_hal::i2s::master::DataFormat::Data32Channel32)
     ).unwrap().into_async();
-    let mut i2s_rx = i2s
+    let i2s_rx = i2s
         .i2s_rx
         .with_bclk(peripherals.GPIO7)
         .with_ws(peripherals.GPIO6)
@@ -179,24 +179,22 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 const EXIT_HOLD: Duration = Duration::from_secs(5);
-
 #[embassy_executor::task]
 async fn render(mut spi: SpiDmaBus<'static, Async>) {
-    let mut last = Instant::now();
-    let mut t: f32 = 0.0;
+    let started = Instant::now();
+    let mut last = started;
     let mut bank = SketchBank::new();
-    let mut next = Instant::now();
+    let mut next = started;
+    let mut frame_index = 0u64;
     let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
     let mut last_audio = AudioFeatures::default();
     let mut tx_buf = [0u8; SPI_FRAME];
     let mut press_start: Option<Instant> = None;
     let mut swallow_release = false;
     loop {
-        next += Duration::from_millis(1000/120);
         let now = Instant::now();
-        let dt = (now - last).as_millis() as f32 / 1000.0;
+        let dt_us = esp32_phyllotaxis::timebase::clamp_dt_us((now - last).as_micros());
         last = now;
-        t += dt;
 
         if let Some(a) = AUDIO.try_take() { last_audio = a; }
 
@@ -234,7 +232,15 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
             esp32_phyllotaxis::wasm::AUDIO_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
         }
 
-        let params = SketchParams { dt, t, audio: last_audio, detents, pressed, released };
+        let params = SketchParams {
+            dt_us,
+            elapsed_us: (now - started).as_micros(),
+            frame_index,
+            audio: last_audio,
+            detents,
+            pressed,
+            released,
+        };
         bank.render(&mut led_buf, &params);
         apply_gamma(&mut led_buf);
 
@@ -248,20 +254,25 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
             1,
             core::sync::atomic::Ordering::Relaxed,
         );
+        frame_index = frame_index.wrapping_add(1);
 
-        Timer::at(next).await;
-        // Waking late means the executor was starved -- whatever caused it is
-        // also what overruns the i2s ring.
-        let lag = Instant::now() - next;
-        if lag > Duration::from_millis(1000 / 120) {
+        next += Duration::from_micros(esp32_phyllotaxis::timebase::FRAME_PERIOD_US);
+        let finished = Instant::now();
+        if finished > next {
+            let lag = finished - next;
+            let missed = 1 + lag.as_micros() / esp32_phyllotaxis::timebase::FRAME_PERIOD_US;
             esp32_phyllotaxis::health::MISSED_FRAME_DEADLINES.fetch_add(
-                1,
+                missed.min(u32::MAX as u64) as u32,
                 core::sync::atomic::Ordering::Relaxed,
             );
-        }
-        if lag > Duration::from_millis(50) {
-            defmt::warn!("render stalled {}ms", lag.as_millis());
-            next = Instant::now();
+            if lag > Duration::from_millis(50) {
+                defmt::warn!("render stalled {}ms", lag.as_millis());
+            }
+            // Drop accumulated backlog. A subsequent fast frame can return to
+            // the fixed cadence instead of running permanently behind.
+            next = finished;
+        } else {
+            Timer::at(next).await;
         }
     }
 }

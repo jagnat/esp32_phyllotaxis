@@ -22,28 +22,25 @@ use crate::util::{LED_POSITIONS, NUM_LEDS, Rgb};
 pub static AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub const CAP_AUDIO_FEATURES: u32 = 1;
-pub const CAP_AUDIO_BINS: u32 = 2;
 pub const CAP_WANTS_INPUT: u32 = 4;
 
-pub const ABI_VERSION: u32 = 1;
-pub const NUM_BINS: usize = 256;
+pub const ABI_VERSION: u32 = 2;
 pub const FRAME_LEN: usize = NUM_LEDS * 3;
 
 // Input block, little-endian:
 //   0  u32      abi version
-//   4  f32      t
-//   8  f32      dt
-//   12 i32      encoder position (absolute)
-//   16 i32      encoder detents this frame
-//   20 u8       buttons: bit0 = held, bit1 = released edge
-//   21 u8[3]    pad
-//   24 f32[6]   bands        \
-//   48 f32[6]   transients    | present when CAP_AUDIO_FEATURES
-//   72 f32[6]   sustain       | (zeroed otherwise)
-//   96 f32[6]   super_sustain/
-//   120 f32[256] fft magnitudes, only written when CAP_AUDIO_BINS
-const INPUT_HDR_LEN: usize = 120;
-pub const INPUT_LEN: usize = INPUT_HDR_LEN + NUM_BINS * 4;
+//   4  u32      dt_us (clamped to 50ms by the host)
+//   8  u64      elapsed_us
+//  16  u64      frame index
+//  24  i32      encoder position (absolute)
+//  28  i32      encoder detents this frame
+//  32  u8       buttons: bit0 = held, bit1 = released edge
+//  33  u8[3]    pad
+//  36  f32[6]   bands        \
+//  60  f32[6]   transients    | present when CAP_AUDIO_FEATURES
+//  84  f32[6]   sustain       | (zeroed otherwise)
+// 108  f32[6]   super_sustain/
+pub const INPUT_LEN: usize = 132;
 
 const AGC_CHANNELS: usize = 16;
 const MAX_GUEST_MEMORY: usize = 1 << 20;
@@ -54,14 +51,14 @@ const FUEL_PER_FRAME: u64 = 150_000;
 const FUEL_FOR_LOAD: u64 = 100_000_000;
 
 pub struct InputFrame<'a> {
-    pub t: f32,
-    pub dt: f32,
+    pub dt_us: u32,
+    pub elapsed_us: u64,
+    pub frame_index: u64,
     pub encoder_pos: i32,
     pub detents: i32,
     pub pressed: bool,
     pub released: bool,
     pub audio: &'a AudioFeatures,
-    pub bins: Option<&'a [f32; NUM_BINS]>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -115,6 +112,7 @@ pub enum LoadError {
     Instantiate,
     NoMemory,
     NoRender,
+    BadAbi,
     BadLayout,
 }
 
@@ -124,12 +122,14 @@ pub fn validate(bytes: &[u8]) -> Result<(), LoadError> {
     let module = Module::new(&engine, bytes).map_err(|_| LoadError::Invalid)?;
     let mut memory = false;
     let mut render = false;
+    let mut abi_version = false;
     let mut input_ptr = false;
     let mut frame_ptr = false;
     for export in module.exports() {
         match export.name() {
             "memory" => memory = true,
             "render" => render = true,
+            "abi_version" => abi_version = true,
             "input_ptr" => input_ptr = true,
             "frame_ptr" => frame_ptr = true,
             _ => {}
@@ -138,7 +138,7 @@ pub fn validate(bytes: &[u8]) -> Result<(), LoadError> {
     if !memory {
         return Err(LoadError::NoMemory);
     }
-    if !render {
+    if !(render && abi_version) {
         return Err(LoadError::NoRender);
     }
     if !(input_ptr && frame_ptr) {
@@ -233,6 +233,15 @@ impl SketchInstance {
             .map_err(|_| LoadError::NoRender)?;
         let preview = instance.get_typed_func::<(), ()>(&store, "preview").ok();
 
+        let abi_version = instance
+            .get_typed_func::<(), u32>(&store, "abi_version")
+            .map_err(|_| LoadError::BadAbi)?
+            .call(&mut store, ())
+            .map_err(|_| LoadError::BadAbi)?;
+        if abi_version != ABI_VERSION {
+            return Err(LoadError::BadAbi);
+        }
+
         let caps = match instance.get_typed_func::<(), u32>(&store, "caps") {
             Ok(f) => f.call(&mut store, ()).map_err(|_| LoadError::Instantiate)?,
             Err(_) => 0,
@@ -306,13 +315,14 @@ impl SketchInstance {
 
     fn encode_input(&self, input: &InputFrame, buf: &mut [u8; INPUT_LEN]) -> usize {
         buf[0..4].copy_from_slice(&ABI_VERSION.to_le_bytes());
-        buf[4..8].copy_from_slice(&input.t.to_le_bytes());
-        buf[8..12].copy_from_slice(&input.dt.to_le_bytes());
-        buf[12..16].copy_from_slice(&input.encoder_pos.to_le_bytes());
-        buf[16..20].copy_from_slice(&input.detents.to_le_bytes());
-        buf[20] = input.pressed as u8 | (input.released as u8) << 1;
-        buf[21..24].fill(0);
-        let mut i = 24;
+        buf[4..8].copy_from_slice(&input.dt_us.to_le_bytes());
+        buf[8..16].copy_from_slice(&input.elapsed_us.to_le_bytes());
+        buf[16..24].copy_from_slice(&input.frame_index.to_le_bytes());
+        buf[24..28].copy_from_slice(&input.encoder_pos.to_le_bytes());
+        buf[28..32].copy_from_slice(&input.detents.to_le_bytes());
+        buf[32] = input.pressed as u8 | (input.released as u8) << 1;
+        buf[33..36].fill(0);
+        let mut i = 36;
         if self.caps & CAP_AUDIO_FEATURES != 0 {
             let a = input.audio;
             for arr in [&a.bands, &a.transients, &a.sustain, &a.super_sustain] {
@@ -322,22 +332,9 @@ impl SketchInstance {
                 }
             }
         } else {
-            buf[24..INPUT_HDR_LEN].fill(0);
+            buf[36..INPUT_LEN].fill(0);
         }
-        if self.caps & CAP_AUDIO_BINS != 0 {
-            let mut i = INPUT_HDR_LEN;
-            if let Some(bins) = input.bins {
-                for v in bins {
-                    buf[i..i + 4].copy_from_slice(&v.to_le_bytes());
-                    i += 4;
-                }
-            } else {
-                buf[INPUT_HDR_LEN..].fill(0);
-            }
-            INPUT_LEN
-        } else {
-            INPUT_HDR_LEN
-        }
+        INPUT_LEN
     }
 }
 
@@ -384,8 +381,8 @@ impl WasmSketch {
                 .is_some_and(|i| i.caps & CAP_WANTS_INPUT != 0)
     }
 
-    fn breath(leds: &mut [Rgb; NUM_LEDS], t: f32, color: Rgb) {
-        let breath = (sinf(t * 1.5) + 1.0) * 0.5;
+    fn breath(leds: &mut [Rgb; NUM_LEDS], p: &SketchParams, color: Rgb) {
+        let breath = (sinf(p.phase_radians(4_188_790)) + 1.0) * 0.5;
         for led in leds.iter_mut() {
             *led = Rgb::new(0, 0, 0).lerp(color, 0.1 + 0.25 * breath);
         }
@@ -395,7 +392,9 @@ impl WasmSketch {
 impl Sketch for WasmSketch {
     fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
         if let Some(bytes) = PENDING.lock(|pending| pending.borrow_mut().take()) {
-            let seed = p.t.to_bits() ^ input::ENCODER_POS.load(Ordering::Relaxed) as u32;
+            let seed = p.elapsed_us as u32
+                ^ (p.elapsed_us >> 32) as u32
+                ^ input::ENCODER_POS.load(Ordering::Relaxed) as u32;
             let load_started = Instant::now();
             let loaded = SketchInstance::load(&bytes, seed);
             crate::health::record_max(
@@ -419,30 +418,30 @@ impl Sketch for WasmSketch {
 
         let Some(inst) = self.inst.as_mut() else {
             let color = if self.dead { Rgb::new(255, 0, 0) } else { Rgb::new(160, 0, 255) };
-            Self::breath(leds, p.t, color);
+            Self::breath(leds, p, color);
             AUDIO_ENABLED.store(true, Ordering::Relaxed);
             return;
         };
 
         if self.dead {
             AUDIO_ENABLED.store(true, Ordering::Relaxed);
-            Self::breath(leds, p.t, Rgb::new(255, 0, 0));
+            Self::breath(leds, p, Rgb::new(255, 0, 0));
             return;
         }
         AUDIO_ENABLED.store(
-            inst.caps & (CAP_AUDIO_FEATURES | CAP_AUDIO_BINS) != 0,
+            inst.caps & CAP_AUDIO_FEATURES != 0,
             Ordering::Relaxed,
         );
 
         let frame = InputFrame {
-            t: p.t,
-            dt: p.dt,
+            dt_us: p.dt_us,
+            elapsed_us: p.elapsed_us,
+            frame_index: p.frame_index,
             encoder_pos: input::ENCODER_POS.load(Ordering::Relaxed),
             detents: p.detents,
             pressed: p.pressed,
             released: p.released,
             audio: &p.audio,
-            bins: None,
         };
         let frame_started = Instant::now();
         let result = inst.run_frame(&frame, &mut self.frame, false);
@@ -484,14 +483,14 @@ pub fn spike() {
 
     let audio = AudioFeatures::default();
     let input = InputFrame {
-        t: 1.0,
-        dt: 1.0 / 120.0,
+        dt_us: 16_667,
+        elapsed_us: 1_000_000,
+        frame_index: 60,
         encoder_pos: 0,
         detents: 0,
         pressed: false,
         released: false,
         audio: &audio,
-        bins: None,
     };
     let mut out = [0u8; FRAME_LEN];
 
