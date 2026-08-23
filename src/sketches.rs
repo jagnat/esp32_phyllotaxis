@@ -402,9 +402,7 @@ impl SketchBank {
 			encoder_test: EncoderTestSketch::default(),
 			stream: StreamSketch,
 			wasm: crate::wasm::WasmSketch::default(),
-			// Temporary bring-up default: boot directly into the bundled WASM
-			// cadence test. The production state machine will replace this.
-			active: Self::WASM_SLOT }
+			active: 0 }
 	}
 
 	const COUNT: usize = 7;

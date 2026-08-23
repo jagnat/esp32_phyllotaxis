@@ -3,6 +3,13 @@ use core::f32::consts::TAU;
 pub const FRAME_PERIOD_US: u64 = 16_667;
 pub const MAX_DT_US: u64 = 50_000;
 
+/// Elapsed milliseconds for wrapping 32-bit telemetry clocks. This remains
+/// correct across the roughly 49.7-day wrap as long as intervals stay below
+/// half the counter range.
+pub const fn elapsed_ms32(now: u32, then: u32) -> u32 {
+    now.wrapping_sub(then)
+}
+
 pub fn clamp_dt_us(actual_us: u64) -> u32 {
     actual_us.min(MAX_DT_US) as u32
 }
@@ -50,6 +57,12 @@ mod tests {
     fn delta_is_clamped_after_a_stall() {
         assert_eq!(clamp_dt_us(16_667), 16_667);
         assert_eq!(clamp_dt_us(5_000_000), 50_000);
+    }
+
+    #[test]
+    fn millisecond_clock_handles_startup_and_wrap() {
+        assert_eq!(elapsed_ms32(0, 0), 0);
+        assert_eq!(elapsed_ms32(10, u32::MAX - 4), 15);
     }
 
     #[test]

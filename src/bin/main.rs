@@ -10,8 +10,8 @@
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_buffers;
 use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
-use esp_hal::time::Rate;
-use esp_hal::timer::timg::TimerGroup;
+use esp_hal::time::{Duration as HalDuration, Rate};
+use esp_hal::timer::timg::{MwdtStage, TimerGroup, Wdt};
 use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
 use esp_hal::Async;
@@ -108,6 +108,9 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(size: 96 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let mut watchdog = timg0.wdt;
+    watchdog.set_timeout(MwdtStage::Stage0, HalDuration::from_secs(5));
+    watchdog.enable();
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
@@ -154,7 +157,7 @@ async fn main(spawner: Spawner) -> ! {
     )
     .into_async();
 
-    spawner.spawn(unwrap!(render(spi)));
+    spawner.spawn(unwrap!(render(spi, watchdog)));
     spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
 
     esp32_phyllotaxis::gallery::init(peripherals.FLASH);
@@ -180,7 +183,10 @@ async fn main(spawner: Spawner) -> ! {
 
 const EXIT_HOLD: Duration = Duration::from_secs(5);
 #[embassy_executor::task]
-async fn render(mut spi: SpiDmaBus<'static, Async>) {
+async fn render(
+    mut spi: SpiDmaBus<'static, Async>,
+    mut watchdog: Wdt<esp_hal::peripherals::TIMG0<'static>>,
+) {
     let started = Instant::now();
     let mut last = started;
     let mut bank = SketchBank::new();
@@ -189,9 +195,25 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
     let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
     let mut last_audio = AudioFeatures::default();
     let mut tx_buf = [0u8; SPI_FRAME];
+    let mut power_limiter = esp32_phyllotaxis::power::LedPowerLimiter::new();
     let mut press_start: Option<Instant> = None;
     let mut swallow_release = false;
     loop {
+        if esp32_phyllotaxis::health::audio_dma_stale() {
+            error!("audio DMA made no progress for 10s; rebooting");
+            esp32_phyllotaxis::health::request_reboot(2);
+        }
+        if esp32_phyllotaxis::health::REBOOT_REQUESTED.swap(
+            false,
+            core::sync::atomic::Ordering::Acquire,
+        ) {
+            led_buf.fill(Rgb::new(0, 0, 0));
+            encode(&led_buf, &mut tx_buf);
+            let _ = spi.write_async(&tx_buf).await;
+            Timer::after(Duration::from_millis(20)).await;
+            esp_hal::system::software_reset();
+        }
+
         let now = Instant::now();
         let dt_us = esp32_phyllotaxis::timebase::clamp_dt_us((now - last).as_micros());
         last = now;
@@ -243,6 +265,7 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         };
         bank.render(&mut led_buf, &params);
         apply_gamma(&mut led_buf);
+        power_limiter.apply(&mut led_buf);
 
         encode(&led_buf, &mut tx_buf);
 
@@ -250,6 +273,7 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         if let Err(e) = spi.write_async(&tx_buf).await {
             error!("spi tx err: {}", e);
         }
+        watchdog.feed();
         esp32_phyllotaxis::health::RENDERED_FRAMES.fetch_add(
             1,
             core::sync::atomic::Ordering::Relaxed,
@@ -308,33 +332,33 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4
         Ok(t) => t,
         Err(e) => {
             error!("i2s circular init err: {}", e);
+            esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
+                1,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            esp32_phyllotaxis::health::request_reboot(1);
             return;
         }
     };
+    esp32_phyllotaxis::health::audio_capture_started();
     let stage = STAGE.init([0u8; 8 * 4092 + 4096]);
     let mut fill = 0usize;
-    let mut err_logged = false;
     loop {
         let n = match transfer.pop(&mut stage[fill..fill + 8 * 4092]).await {
             Ok(n) => n,
             Err(e) => {
                 // An overrun (Late) wedges the circular transfer permanently;
-                // esp-hal has no restart API. Log once, then poll quietly in
-                // case a future update makes it recoverable.
-                if !err_logged {
-                    error!("i2s pop err: {} (audio disabled until reboot)", e);
-                    esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
-                        1,
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                    err_logged = true;
-                }
-                fill = 0;
-                Timer::after(Duration::from_millis(500)).await;
-                continue;
+                // esp-hal has no restart API, so reboot the peripheral cleanly.
+                error!("i2s pop err: {}; requesting reboot", e);
+                esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
+                    1,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                esp32_phyllotaxis::health::request_reboot(1);
+                return;
             }
         };
-        err_logged = false;
+        esp32_phyllotaxis::health::note_audio_dma_progress();
         fill += n;
 
         if !esp32_phyllotaxis::wasm::AUDIO_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
