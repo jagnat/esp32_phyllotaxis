@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+config_file=${PHYLLO_ENV_FILE:-$repo_dir/.phyllo.env}
+if [ -r "$config_file" ]; then
+    # This is deliberately ignored by Git and should be readable only by you.
+    . "$config_file"
+fi
+
+usage() {
+    printf '%s\n' \
+        'usage: ./phyllo list|health|build|upload|run|delete|native' \
+        '' \
+        'Configure PHYLLO_HOST, PHYLLO_API_TOKEN, PHYLLO_SLOT,' \
+        'PHYLLO_NAME, and PHYLLO_COLOR in .phyllo.env or your shell.' >&2
+    exit 2
+}
+
+command_name=${1:-}
+[ -n "$command_name" ] || usage
+curl_common='--fail-with-body --silent --show-error --connect-timeout 3 --max-time 30'
+
+if [ "$command_name" = build ]; then
+    cd "$repo_dir"
+    cargo build --release
+    exit
+fi
+
+case ${PHYLLO_HOST:-} in
+    http://*|https://*) base_url=${PHYLLO_HOST%/} ;;
+    '') printf '%s\n' 'PHYLLO_HOST is not configured' >&2; exit 2 ;;
+    *) base_url=http://${PHYLLO_HOST%/} ;;
+esac
+
+auth() {
+    if [ -z "${PHYLLO_API_TOKEN:-}" ] || [ "$PHYLLO_API_TOKEN" = replace-with-the-board-token ]; then
+        printf '%s\n' 'PHYLLO_API_TOKEN is not configured' >&2
+        exit 2
+    fi
+}
+
+slot() {
+    case ${PHYLLO_SLOT:-} in
+        ''|*[!0-9]*) printf '%s\n' 'PHYLLO_SLOT must be 0..99' >&2; exit 2 ;;
+    esac
+    if [ "$PHYLLO_SLOT" -gt 99 ]; then
+        printf '%s\n' 'PHYLLO_SLOT must be 0..99' >&2
+        exit 2
+    fi
+}
+
+case "$command_name" in
+    list)
+        # shellcheck disable=SC2086 -- intentional expansion into curl flags.
+        curl $curl_common "$base_url/api/sketches"
+        ;;
+    health)
+        # shellcheck disable=SC2086
+        curl $curl_common "$base_url/api/health"
+        ;;
+    upload)
+        auth
+        slot
+        name=${PHYLLO_NAME:-}
+        color=${PHYLLO_COLOR:-#be28ff}
+        case "$name" in
+            ''|*[!A-Za-z0-9._-]*) printf '%s\n' 'PHYLLO_NAME contains invalid characters' >&2; exit 2 ;;
+        esac
+        cd "$repo_dir"
+        cargo build --release
+        module=target/wasm32-unknown-unknown/release/phyllotaxis_sketch.wasm
+        bytes=$(wc -c < "$module" | tr -d ' ')
+        if [ "$bytes" -gt 32704 ]; then
+            printf 'module is too large: %s bytes (maximum 32704)\n' "$bytes" >&2
+            exit 1
+        fi
+        # shellcheck disable=SC2086
+        curl $curl_common -X POST \
+            -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+            -H 'Content-Type: application/wasm' \
+            -H "X-Phyllo-Color: $color" \
+            --data-binary "@$module" \
+            "$base_url/api/sketches/$PHYLLO_SLOT/$name"
+        ;;
+    run)
+        auth
+        slot
+        # shellcheck disable=SC2086
+        curl $curl_common -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+            "$base_url/api/run/$PHYLLO_SLOT"
+        ;;
+    delete)
+        auth
+        slot
+        # shellcheck disable=SC2086
+        curl $curl_common -X DELETE -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+            "$base_url/api/sketches/$PHYLLO_SLOT"
+        ;;
+    native)
+        auth
+        native_slot=${2:-0}
+        # shellcheck disable=SC2086
+        curl $curl_common -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
+            "$base_url/api/select/$native_slot"
+        ;;
+    *) usage ;;
+esac
+
+printf '\n'

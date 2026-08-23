@@ -1,6 +1,7 @@
 # Wasm sketch ABI
 
-A sketch is a wasm module (any language; `tools/testmod/` is a Rust example).
+A sketch is a wasm module in any language. `tools/wasm-sketch-template/` is the
+standalone Rust starter; `tools/testmod/` is the firmware's embedded test module.
 The host runs it under wasmi with fuel metering; a trap or sustained overruns
 disable the sketch without affecting the board.
 
