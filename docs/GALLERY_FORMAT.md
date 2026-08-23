@@ -7,11 +7,11 @@ header followed by at most 32,704 bytes of WASM payload.
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | magic `PHYW` |
-| 4 | 2 | header format version (`2`) |
+| 4 | 2 | header format version (`1`) |
 | 6 | 2 | header length (`64`) |
 | 8 | 4 | payload length |
 | 12 | 4 | payload CRC-32/ISO-HDLC |
-| 16 | 4 | WASM ABI version (`2`) |
+| 16 | 4 | WASM ABI version (`1`) |
 | 20 | 4 | capability bits |
 | 24 | 3 | RGB menu color |
 | 27 | 1 | reserved |

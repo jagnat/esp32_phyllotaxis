@@ -36,7 +36,7 @@ For the 6,347-byte reference module on hardware:
 - external heap retained by the instance: about 94 KiB
 - internal heap remained at 98,304 bytes free
 
-Guests have a 1 MiB linear-memory limit and 150K fuel per frame. Gallery size
+Guests have a 1 MiB linear-memory limit and 120K fuel per frame. Gallery size
 therefore does not change steady-state render memory, although a larger list
 does make enumeration linearly slower and increases its temporary result by a
 few KiB.

@@ -29,7 +29,7 @@ active, freeing CPU for the guest. Raw FFT bins are not part of the ABI.
 
 | offset | type      | field                                   |
 |--------|-----------|-----------------------------------------|
-| 0      | u32       | ABI version (`2`)                       |
+| 0      | u32       | ABI version (`1`)                       |
 | 4      | u32       | frame delta, microseconds; capped at 50,000 |
 | 8      | u64       | elapsed microseconds since host render start |
 | 16     | u64       | rendered frame index                    |
