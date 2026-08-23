@@ -25,6 +25,13 @@ directory, flashes the board, unsets the variables, and removes the temporary
 artifacts. It never prints credential values. Serial logs report only
 `wifi connected`, never the SSID.
 
+Pass `--monitor` to retain the temporary symbol file only for the duration of
+a sanitized serial-monitor session. Exiting the monitor deletes it:
+
+```sh
+tools/private_build_flash.zsh --monitor
+```
+
 After the board reports its DHCP address, run the authenticated API smoke test:
 
 ```sh

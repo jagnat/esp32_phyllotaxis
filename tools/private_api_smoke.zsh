@@ -53,66 +53,66 @@ expect_status() {
     print "$label: HTTP $actual"
 }
 
-status="$(curl -sS --max-time 10 -o "$private_tmp/health.json" -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o "$private_tmp/health.json" -w '%{http_code}' \
     "$base_url/api/health")"
-expect_status health 200 "$status"
+expect_status health 200 "$http_status"
 
-status="$(curl -sS --max-time 10 -o "$private_tmp/list.json" -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o "$private_tmp/list.json" -w '%{http_code}' \
     "$base_url/api/sketches")"
-expect_status list 200 "$status"
+expect_status list 200 "$http_status"
 if grep -q "\"slot\":${smoke_slot}," "$private_tmp/list.json"; then
     print -u2 "slot $smoke_slot is occupied; refusing to overwrite it"
     exit 1
 fi
 
-status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X DELETE "$base_url/api/sketches/$smoke_slot")"
-expect_status unauthenticated-write 401 "$status"
+expect_status unauthenticated-write 401 "$http_status"
 
 print -n 'not a wasm module' >| "$private_tmp/invalid.wasm"
-status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     --data-binary "@$private_tmp/invalid.wasm" \
     "$base_url/api/sketches/$smoke_slot/invalid-smoke")"
-expect_status invalid-module 422 "$status"
+expect_status invalid-module 422 "$http_status"
 
 dd if=/dev/zero of="$private_tmp/oversize.wasm" bs=32705 count=1 2>/dev/null
-status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     --data-binary "@$private_tmp/oversize.wasm" \
     "$base_url/api/sketches/$smoke_slot/oversize-smoke")"
-expect_status oversized-module 413 "$status"
+expect_status oversized-module 413 "$http_status"
 
-status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" -H 'Content-Type: application/wasm' \
     -H 'X-Phyllo-Color: #be28ff' \
     --data-binary "@$repo_dir/tools/testmod/testmod.wasm" \
     "$base_url/api/sketches/$smoke_slot/private-smoke")"
-expect_status upload 201 "$status"
+expect_status upload 201 "$http_status"
 uploaded=1
 
-status="$(curl -sS --max-time 10 -o "$private_tmp/list-after.json" -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o "$private_tmp/list-after.json" -w '%{http_code}' \
     "$base_url/api/sketches")"
-expect_status list-after-upload 200 "$status"
+expect_status list-after-upload 200 "$http_status"
 grep -q "\"slot\":${smoke_slot},\"name\":\"private-smoke\"" "$private_tmp/list-after.json" || {
     print -u2 "uploaded sketch missing from listing"
     exit 1
 }
 
-status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" "$base_url/api/run/$smoke_slot")"
-expect_status run 202 "$status"
+expect_status run 202 "$http_status"
 ran=1
 
 sleep 2
-status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X POST -H "$auth_header" "$base_url/api/select/0")"
-expect_status return-to-main 202 "$status"
+expect_status return-to-main 202 "$http_status"
 ran=0
 
-status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+http_status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
     -X DELETE -H "$auth_header" "$base_url/api/sketches/$smoke_slot")"
-expect_status delete 200 "$status"
+expect_status delete 200 "$http_status"
 uploaded=0
 
 print "Authenticated API smoke test passed; slot $smoke_slot is empty."

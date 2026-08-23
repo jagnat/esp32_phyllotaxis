@@ -1,6 +1,15 @@
 #!/bin/zsh
 set -eu
 
+monitor=0
+if (( $# > 1 )) || { (( $# == 1 )) && [[ "$1" != "--monitor" ]]; }; then
+    print -u2 "usage: tools/private_build_flash.zsh [--monitor]"
+    exit 1
+fi
+if (( $# == 1 )); then
+    monitor=1
+fi
+
 script_dir="${0:A:h}"
 repo_dir="${script_dir:h}"
 config_file="${PHYLLO_PRIVATE_ENV_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/phyllotaxis/device.zsh}"
@@ -25,10 +34,18 @@ trap '[[ -n "${private_target:-}" && -d "$private_target" ]] && rm -rf -- "$priv
 
 cd "$repo_dir"
 CARGO_TARGET_DIR="$private_target" cargo build --release
-espflash flash \
-    --chip esp32s3 \
-    --partition-table partitions.csv \
-    "$private_target/xtensa-esp32s3-none-elf/release/esp32_phyllotaxis"
+if (( monitor )); then
+    espflash flash --monitor \
+        --chip esp32s3 \
+        --log-format defmt \
+        --partition-table partitions.csv \
+        "$private_target/xtensa-esp32s3-none-elf/release/esp32_phyllotaxis"
+else
+    espflash flash \
+        --chip esp32s3 \
+        --partition-table partitions.csv \
+        "$private_target/xtensa-esp32s3-none-elf/release/esp32_phyllotaxis"
+fi
 
 unset PHYLLO_SSID PHYLLO_PASS PHYLLO_API_TOKEN
 print "Private build flashed; temporary build artifacts removed."
