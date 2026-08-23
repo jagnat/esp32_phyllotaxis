@@ -5,6 +5,8 @@ use esp_hal::gpio::Input;
 
 /// Accumulated detents since last read; consumers `swap(0)` to drain.
 pub static ENCODER_DELTA: AtomicI32 = AtomicI32::new(0);
+/// Absolute detent count since boot; never reset.
+pub static ENCODER_POS: AtomicI32 = AtomicI32::new(0);
 /// Set on a debounced button release; consumers `swap(false)` to drain.
 pub static BUTTON_RELEASED: AtomicBool = AtomicBool::new(false);
 /// Debounced button level; true while held down.
@@ -45,8 +47,10 @@ pub async fn encoder_task(a: Input<'static>, b: Input<'static>, btn: Input<'stat
             if cur == 0b11 {
                 if accum >= 4 {
                     ENCODER_DELTA.fetch_add(1, Ordering::Relaxed);
+                    ENCODER_POS.fetch_add(1, Ordering::Relaxed);
                 } else if accum <= -4 {
                     ENCODER_DELTA.fetch_sub(1, Ordering::Relaxed);
+                    ENCODER_POS.fetch_sub(1, Ordering::Relaxed);
                 }
                 accum = 0;
             }

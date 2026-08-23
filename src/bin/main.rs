@@ -94,6 +94,16 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // PSRAM region is registered first so unconstrained allocations (wasmi's
+    // module code, stacks, guest linear memory) land in external RAM; the
+    // internal heap stays available for esp-radio, which allocates with the
+    // Internal capability and can only use that region.
+    // Board is an S3 N_R8: 8MB octal PSRAM. Auto-detect works but explicit is reliable.
+    let psram_config = esp_hal::psram::PsramConfig {
+        mode: esp_hal::psram::PsramMode::OctalSpi,
+        ..Default::default()
+    };
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram, psram_config);
     esp_alloc::heap_allocator!(size: 96 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -101,10 +111,19 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
-    // Continuous (circular) I2S ring: 4 descriptors x CHUNK_SIZE (4092). The clock must
-    // free-run so the INMP441 stays settled -- one-shot reads stop BCLK between reads and
-    // re-capture the mic's DC settling transient every window.
-    let (rx_buffer, rx_descs, _, _) = dma_buffers!(4 * 4092, 0);
+    // The spike blocks this executor for longer than the i2s DMA ring buffers,
+    // and an overrun wedges the circular transfer for good (no restart API in
+    // esp-hal), so it must finish before the audio task starts.
+    esp32_phyllotaxis::wasm::spike();
+    esp32_phyllotaxis::wasm::preload_demo();
+
+    // Continuous (circular) I2S ring: 8 descriptors x CHUNK_SIZE (4092), ~128ms
+    // at 32kHz stereo -- enough to ride out flash-write stalls (interrupts are
+    // disabled per erased sector) without overrunning, since an overrun wedges
+    // the transfer permanently. The clock must free-run so the INMP441 stays
+    // settled -- one-shot reads stop BCLK between reads and re-capture the
+    // mic's DC settling transient every window.
+    let (rx_buffer, rx_descs, _, _) = dma_buffers!(8 * 4092, 0);
     let i2s = I2s::new(
         peripherals.I2S0,
         peripherals.DMA_CH0,
@@ -136,6 +155,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(unwrap!(render(spi)));
     spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
 
+    esp32_phyllotaxis::gallery::init(peripherals.FLASH);
+
     let rng = esp_hal::rng::Rng::new();
     let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
     net::start(spawner, peripherals.WIFI, seed);
@@ -155,6 +176,8 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
+const EXIT_HOLD: Duration = Duration::from_secs(5);
+
 #[embassy_executor::task]
 async fn render(mut spi: SpiDmaBus<'static, Async>) {
     let mut last = Instant::now();
@@ -164,6 +187,8 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
     let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
     let mut last_audio = AudioFeatures::default();
     let mut tx_buf = [0u8; SPI_FRAME];
+    let mut press_start: Option<Instant> = None;
+    let mut swallow_release = false;
     loop {
         next += Duration::from_millis(1000/120);
         let now = Instant::now();
@@ -176,9 +201,32 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         let detents = ENCODER_DELTA.swap(0, core::sync::atomic::Ordering::Relaxed);
         let released = BUTTON_RELEASED.swap(false, core::sync::atomic::Ordering::Relaxed);
         let pressed = BUTTON_PRESSED.load(core::sync::atomic::Ordering::Relaxed);
-        if released { bank.step(1); }
+
+        // A click steps to the next sketch, unless a wasm guest claimed the
+        // input -- then only holding the button EXIT_HOLD long escapes, and the
+        // release that follows must not step again.
+        if pressed && press_start.is_none() { press_start = Some(now); }
+        if !pressed { press_start = None; }
+        if bank.input_claimed() {
+            if press_start.is_some_and(|t0| now - t0 >= EXIT_HOLD) {
+                bank.step(1);
+                press_start = None;
+                swallow_release = true;
+            }
+        } else if released {
+            if swallow_release {
+                swallow_release = false;
+            } else {
+                bank.step(1);
+            }
+        }
         let selected = SKETCH_SELECT.swap(-1, core::sync::atomic::Ordering::Relaxed);
         if selected >= 0 { bank.set(selected as usize); }
+
+        // Only the wasm sketch may park the audio pipeline, and only while active.
+        if bank.active() != SketchBank::WASM_SLOT {
+            esp32_phyllotaxis::wasm::AUDIO_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
 
         let params = SketchParams { dt, t, audio: last_audio, detents, pressed, released };
         bank.render(&mut led_buf, &params);
@@ -190,8 +238,15 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
         if let Err(e) = spi.write_async(&tx_buf).await {
             error!("spi tx err: {}", e);
         }
-        
+
         Timer::at(next).await;
+        // Waking late means the executor was starved -- whatever caused it is
+        // also what overruns the i2s ring.
+        let lag = Instant::now() - next;
+        if lag > Duration::from_millis(50) {
+            defmt::warn!("render stalled {}ms", lag.as_millis());
+            next = Instant::now();
+        }
     }
 }
 
@@ -199,12 +254,28 @@ async fn render(mut spi: SpiDmaBus<'static, Async>) {
 // so window boundaries stay frame-aligned).
 const WINDOW: usize = 512 * 8;
 
-// Staging: holds carry-over (< WINDOW) plus one pop (<= ring's available). Sized generously
-// so `pop` (which errors if the buffer is smaller than what's available) never underflows.
-static STAGE: StaticCell<[u8; 16384]> = StaticCell::new();
+// Staging: holds carry-over (< WINDOW) plus one pop (<= the full ring). `pop`
+// errors if the buffer is smaller than what's available, so this must exceed
+// the ring size.
+static STAGE: StaticCell<[u8; 8 * 4092 + 4096]> = StaticCell::new();
 
 #[embassy_executor::task]
-async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 4 * 4092]) {
+async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4092]) {
+    // Radio bring-up (RF calibration / association) can swallow the GDMA
+    // in-done interrupt long enough to overrun the ring, which wedges the
+    // circular transfer for good -- so don't start it until wifi is settled
+    // (or clearly isn't coming).
+    if esp32_phyllotaxis::net::WIFI_STARTED.load(core::sync::atomic::Ordering::Relaxed) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !esp32_phyllotaxis::net::NET_UP.load(core::sync::atomic::Ordering::Relaxed)
+            && Instant::now() < deadline
+        {
+            Timer::after(Duration::from_millis(100)).await;
+        }
+        Timer::after(Duration::from_secs(1)).await;
+        info!("starting audio capture");
+    }
+
     let mut proc = AudioProcessor::new();
     let mut transfer = match i2s_rx.read_dma_circular_async(buf) {
         Ok(t) => t,
@@ -213,18 +284,32 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 4 * 4
             return;
         }
     };
-    let stage = STAGE.init([0u8; 16384]);
+    let stage = STAGE.init([0u8; 8 * 4092 + 4096]);
     let mut fill = 0usize;
+    let mut err_logged = false;
     loop {
-        let n = match transfer.pop(&mut stage[fill..]).await {
+        let n = match transfer.pop(&mut stage[fill..fill + 8 * 4092]).await {
             Ok(n) => n,
             Err(e) => {
-                error!("i2s pop err: {}", e);
-                fill = 0; // resync
+                // An overrun (Late) wedges the circular transfer permanently;
+                // esp-hal has no restart API. Log once, then poll quietly in
+                // case a future update makes it recoverable.
+                if !err_logged {
+                    error!("i2s pop err: {} (audio disabled until reboot)", e);
+                    err_logged = true;
+                }
+                fill = 0;
+                Timer::after(Duration::from_millis(500)).await;
                 continue;
             }
         };
+        err_logged = false;
         fill += n;
+
+        if !esp32_phyllotaxis::wasm::AUDIO_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            fill = 0;
+            continue;
+        }
 
         while fill >= WINDOW {
             // DC block: the INMP441 carries a DC offset that leaks into the lowest FFT bins
@@ -235,6 +320,7 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 4 * 4
             }
             let dc = (sum as f32 / 512.0) / 8388608.0;
             let feats = proc.process(|i| decode_left_sample(&stage[..WINDOW], i) as f32 / 8388608.0 - dc);
+            esp32_phyllotaxis::stream::AUDIO_SNAPSHOT.lock(|a| *a.borrow_mut() = feats);
             AUDIO.signal(feats);
             stage.copy_within(WINDOW..fill, 0);
             fill -= WINDOW;

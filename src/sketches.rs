@@ -322,12 +322,36 @@ impl Sketch for EncoderTestSketch {
 	}
 }
 
+// Displays frames pushed over DDP; while no stream is live, a slow dim cyan
+// breath marks the slot as waiting.
+pub struct StreamSketch;
+impl Sketch for StreamSketch {
+	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
+		if crate::stream::stream_fresh() {
+			crate::stream::FRAME.lock(|f| {
+				let f = f.borrow();
+				for (i, led) in leds.iter_mut().enumerate() {
+					*led = Rgb::new(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+				}
+			});
+		} else {
+			let breath = (sinf(p.t * 1.5) + 1.0) * 0.5;
+			let v = (10.0 + 25.0 * breath) as u8;
+			for led in leds.iter_mut() {
+				*led = Rgb::new(0, v, v);
+			}
+		}
+	}
+}
+
 pub struct SketchBank {
 	organic: OrganicVibe,
 	audio_sketch: AudioSketch,
 	full_white: FullWhiteSketch,
 	radial_hsv: HsvRadialSketch,
 	encoder_test: EncoderTestSketch,
+	stream: StreamSketch,
+	wasm: crate::wasm::WasmSketch,
 	active: usize,
 }
 impl SketchBank {
@@ -338,10 +362,13 @@ impl SketchBank {
 			full_white: FullWhiteSketch,
 			radial_hsv: HsvRadialSketch,
 			encoder_test: EncoderTestSketch::default(),
+			stream: StreamSketch,
+			wasm: crate::wasm::WasmSketch::default(),
 			active: 4 }
 	}
 
-	const COUNT: usize = 5;
+	const COUNT: usize = 7;
+	pub const WASM_SLOT: usize = 6;
 
 	pub fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		match self.active {
@@ -349,8 +376,20 @@ impl SketchBank {
 			2 => self.full_white.render(leds, p),
 			3 => self.radial_hsv.render(leds, p),
 			4 => self.encoder_test.render(leds, p),
+			5 => self.stream.render(leds, p),
+			6 => self.wasm.render(leds, p),
 			_ => self.organic.render(leds, p),
 		}
+	}
+
+	pub fn active(&self) -> usize {
+		self.active
+	}
+
+	/// True while the active sketch is a wasm guest that claimed the encoder
+	/// and button; exiting it then requires the long-press gesture.
+	pub fn input_claimed(&self) -> bool {
+		self.active == Self::WASM_SLOT && self.wasm.wants_input()
 	}
 
 	pub fn step(&mut self, delta: i32) {

@@ -1,0 +1,5 @@
+[build]
+target = "wasm32-unknown-unknown"
+# The default wasm shadow-stack is 1MB, which alone would blow the host's
+# guest-memory limit.
+rustflags = ["-C", "link-arg=-zstack-size=16384"]

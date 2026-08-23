@@ -32,7 +32,12 @@ libm     = "0.2"
 esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "defmt", "esp-alloc"] }
 esp-alloc = "0.10.0"
 embassy-net = { version = "0.9.1", features = ["defmt", "dhcpv4", "dns", "medium-ethernet", "proto-ipv4", "tcp", "udp"] }
-picoserve = { version = "0.19", features = ["embassy", "defmt"] }
+picoserve = { version = "0.19", features = ["embassy", "defmt", "ws", "alloc"] }
+
+# --- wasm sketch gallery (phase 2) ---
+wasmi = { version = "1.1.0", default-features = false }
+esp-storage = { version = "0.9.0", features = ["esp32s3"] }
+embedded-storage = "0.3"
 
 # --- needed for the port (see PORTING.md); versions TBD against esp-hal 1.1 ---
 # esp-hal-smartled is UNUSABLE on esp-hal 1.1: latest (0.17.0) and even git still
@@ -48,6 +53,9 @@ picoserve = { version = "0.19", features = ["embassy", "defmt"] }
 # The default debug profile is too slow and too big for resource-constrained devices.
 # Always build with some optimizations enabled.
 opt-level = "s"
+# The esp rustc's incremental codegen assembles global_asm! without the esp32s3
+# CPU features, rejecting loop-option registers (LBEG) in vendor/xtensa-lx-rt.
+incremental = false
 
 [profile.release]
 codegen-units = 1     # LLVM can perform better optimizations using a single thread
