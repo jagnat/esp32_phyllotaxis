@@ -25,7 +25,7 @@ pub const CAP_AUDIO_FEATURES: u32 = 1;
 pub const CAP_WANTS_INPUT: u32 = 4;
 pub const KNOWN_CAPS: u32 = CAP_AUDIO_FEATURES | CAP_WANTS_INPUT;
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 1;
 pub const FRAME_LEN: usize = NUM_LEDS * 3;
 
 // Input block, little-endian:

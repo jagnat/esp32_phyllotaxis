@@ -4,7 +4,7 @@
 Usage: ./ddp_demo.py <board-ip>
 Select the stream slot first (write API token required):
   curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
-       http://<board-ip>/api/v2/select/5
+       http://<board-ip>/api/select/5
 """
 import math
 import select

@@ -1,4 +1,4 @@
-# Gallery storage format v2
+# Gallery storage format
 
 The `sketches` partition begins at `0x410000`, occupies `0x320000` bytes, and
 contains 100 fixed 32 KiB slots. Each slot contains a 64-byte little-endian
@@ -31,7 +31,3 @@ Writes are transactional at slot granularity:
 A reset at any point before step 3 leaves an invalid slot. A torn final commit
 is rejected by header validation or the payload CRC. Rewriting or deleting one
 slot does not affect another slot.
-
-Legacy v1 headers (`PHYW`, payload length, CRC, 24-byte name) are recognized as
-read-only compatibility records. The next successful upload to that slot
-replaces it with v2.

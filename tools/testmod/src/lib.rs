@@ -21,7 +21,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn abi_version() -> u32 {
-    2
+    1
 }
 
 #[unsafe(no_mangle)]

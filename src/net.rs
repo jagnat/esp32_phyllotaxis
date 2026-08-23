@@ -174,18 +174,18 @@ impl AppBuilder for App {
                     response(
                         StatusCode::OK,
                         format!(
-                            "{{\"name\":\"phyllotaxis\",\"api_version\":2,\"write_enabled\":{}}}\n",
+                            "{{\"name\":\"phyllotaxis\",\"write_enabled\":{}}}\n",
                             write_api_enabled()
                         ),
                     )
                 }),
             )
             .route(
-                "/api/v2/health",
+                "/api/health",
                 get(|| async { response(StatusCode::OK, crate::health::json()) }),
             )
             .route(
-                ("/api/v2/select", parse_path_segment::<usize>()),
+                ("/api/select", parse_path_segment::<usize>()),
                 post(select_sketch),
             )
             .route(
@@ -194,21 +194,21 @@ impl AppBuilder for App {
                     ws.on_upgrade(crate::stream::WsStream)
                 }),
             )
-            .route("/api/v2/sketches", get(sketches_list))
+            .route("/api/sketches", get(sketches_list))
             .route(
                 (
-                    "/api/v2/sketches",
+                    "/api/sketches",
                     parse_path_segment::<usize>(),
                     parse_path_segment::<String>(),
                 ),
                 post(sketches_upload),
             )
             .route(
-                ("/api/v2/sketches", parse_path_segment::<usize>()),
+                ("/api/sketches", parse_path_segment::<usize>()),
                 delete(sketches_delete),
             )
             .route(
-                ("/api/v2/run", parse_path_segment::<usize>()),
+                ("/api/run", parse_path_segment::<usize>()),
                 post(sketches_run),
             )
     }
@@ -229,7 +229,7 @@ async fn sketches_list() -> ApiResponse {
             let mut out = String::new();
             let _ = write!(
                 out,
-                "{{\"api_version\":2,\"abi_version\":{},\"slot_count\":{},\"slot_size\":{},\"max_module_size\":{},\"write_enabled\":{},\"sketches\":[",
+                "{{\"abi_version\":{},\"slot_count\":{},\"slot_size\":{},\"max_module_size\":{},\"write_enabled\":{},\"sketches\":[",
                 crate::wasm::ABI_VERSION,
                 crate::gallery::SLOTS,
                 crate::gallery::SLOT_SIZE,
@@ -245,7 +245,7 @@ async fn sketches_list() -> ApiResponse {
                     first = false;
                     let _ = write!(
                         out,
-                        "{{\"slot\":{},\"name\":\"{}\",\"bytes\":{},\"abi_version\":{},\"caps\":{},\"color\":\"#{:02x}{:02x}{:02x}\",\"format_version\":{}}}",
+                        "{{\"slot\":{},\"name\":\"{}\",\"bytes\":{},\"abi_version\":{},\"caps\":{},\"color\":\"#{:02x}{:02x}{:02x}\"}}",
                         i,
                         s.name(),
                         s.len,
@@ -254,7 +254,6 @@ async fn sketches_list() -> ApiResponse {
                         s.color[0],
                         s.color[1],
                         s.color[2],
-                        s.format_version,
                     );
                 }
             }

@@ -1,4 +1,4 @@
-# Wasm sketch ABI (v2)
+# Wasm sketch ABI
 
 A sketch is a wasm module (any language; `tools/testmod/` is a Rust example).
 The host runs it under wasmi with fuel metering; a trap or sustained overruns
@@ -8,7 +8,7 @@ disable the sketch without affecting the board.
 
 | export        | type         | required | notes                                    |
 |---------------|--------------|----------|------------------------------------------|
-| `abi_version` | `() -> u32`  | yes      | must return `2`                          |
+| `abi_version` | `() -> u32`  | yes      | must return `1`                          |
 | `memory`      | memory       | yes      |                                          |
 | `render`      | `() -> ()`   | yes      | called once per frame (60fps target)     |
 | `input_ptr`   | `() -> i32`  | yes      | address of the input block               |
@@ -23,7 +23,7 @@ disable the sketch without affecting the board.
   5s button hold (otherwise any click exits)
 
 Without `AUDIO_FEATURES`, the host parks the FFT pipeline while the sketch is
-active, freeing CPU for the guest. Raw FFT bins are not part of ABI v2.
+active, freeing CPU for the guest. Raw FFT bins are not part of the ABI.
 
 ## Input block (little-endian, written by host before each `render`)
 
@@ -75,20 +75,20 @@ and start-function traps are rejected.
 ```sh
 export PHYLLO_TOKEN='<the token compiled into the firmware>'
 
-curl http://<ip>/api/v2/sketches
+curl http://<ip>/api/sketches
 
 curl -X POST \
      -H "Authorization: Bearer $PHYLLO_TOKEN" \
      -H 'Content-Type: application/wasm' \
      -H 'X-Phyllo-Color: #be28ff' \
      --data-binary @sketch.wasm \
-     http://<ip>/api/v2/sketches/<slot>/<name>
+     http://<ip>/api/sketches/<slot>/<name>
 
 curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://<ip>/api/v2/run/<slot>
+     http://<ip>/api/run/<slot>
 
 curl -X DELETE -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://<ip>/api/v2/sketches/<slot>
+     http://<ip>/api/sketches/<slot>
 ```
 
 All responses are JSON with meaningful HTTP status codes. Listing is read-only
@@ -103,8 +103,8 @@ Names are 1–32 ASCII letters, digits, `.`, `_`, or `-`. The optional
 
 Sketches persist in 100 fixed 32 KiB slots in the `sketches` flash partition
 (see `partitions.csv`; flash once with the table using `cargo run --release`).
-The v2 header is committed only after the payload is complete and CRC-protected;
-interrupted writes therefore fail closed. Legacy v1 slots remain readable.
+The header is committed only after the payload is complete and CRC-protected;
+interrupted writes therefore fail closed.
 
 Build the Rust example with `cargo build --release` from `tools/testmod/`.
 Debug WASM output is far too large for a slot.

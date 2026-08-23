@@ -5,9 +5,8 @@ pub const MAX_SKETCH: usize = SLOT_SIZE - HEADER_LEN;
 pub const NAME_LEN: usize = 32;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"PHYW");
-const FORMAT_VERSION: u16 = 2;
-const ABI_VERSION: u32 = 2;
-const LEGACY_NAME_LEN: usize = 24;
+const FORMAT_VERSION: u16 = 1;
+const ABI_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metadata {
@@ -17,7 +16,6 @@ pub struct Metadata {
     pub abi_version: u32,
     pub caps: u32,
     pub color: [u8; 3],
-    pub format_version: u16,
 }
 
 impl Metadata {
@@ -74,44 +72,17 @@ pub fn decode_header(header: &[u8; HEADER_LEN]) -> Option<Metadata> {
         }
         let mut stored_name = [0u8; NAME_LEN];
         stored_name[..name_len].copy_from_slice(name_bytes);
-        return Some(Metadata {
+        Some(Metadata {
             name: stored_name,
             len,
             crc,
             abi_version,
             caps,
             color: [header[24], header[25], header[26]],
-            format_version: version,
-        });
+        })
+    } else {
+        None
     }
-
-    // Legacy v1 layout: magic, len, crc, 24-byte zero-padded name. New v2's
-    // version/header-length word cannot be mistaken for a valid v1 length.
-    let len = u32::from_le_bytes(header[4..8].try_into().ok()?);
-    if len as usize > MAX_SKETCH {
-        return None;
-    }
-    let crc = u32::from_le_bytes(header[8..12].try_into().ok()?);
-    let legacy_name = &header[12..12 + LEGACY_NAME_LEN];
-    let name_len = legacy_name
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(LEGACY_NAME_LEN);
-    let name_str = core::str::from_utf8(&legacy_name[..name_len]).ok()?;
-    if !crate::api_security::valid_name(name_str) {
-        return None;
-    }
-    let mut name = [0u8; NAME_LEN];
-    name[..name_len].copy_from_slice(&legacy_name[..name_len]);
-    Some(Metadata {
-        name,
-        len,
-        crc,
-        abi_version: ABI_VERSION,
-        caps: 0,
-        color: crate::api_security::DEFAULT_MENU_COLOR,
-        format_version: 1,
-    })
 }
 
 pub fn crc32(data: &[u8]) -> u32 {
@@ -136,16 +107,15 @@ mod tests {
     }
 
     #[test]
-    fn v2_header_round_trips_metadata() {
+    fn header_round_trips_metadata() {
         let header = encode_header("rainbow-2", 6_347, 0x1234_5678, 5, [1, 2, 3]).unwrap();
         let metadata = decode_header(&header).unwrap();
         assert_eq!(metadata.name(), "rainbow-2");
         assert_eq!(metadata.len, 6_347);
         assert_eq!(metadata.crc, 0x1234_5678);
-        assert_eq!(metadata.abi_version, 2);
+        assert_eq!(metadata.abi_version, 1);
         assert_eq!(metadata.caps, 5);
         assert_eq!(metadata.color, [1, 2, 3]);
-        assert_eq!(metadata.format_version, 2);
     }
 
     #[test]
@@ -154,18 +124,6 @@ mod tests {
         let mut header = encode_header("valid", 100, 1, 0, [1, 2, 3]).unwrap();
         header[6] = 0;
         assert_eq!(decode_header(&header), None);
-    }
-
-    #[test]
-    fn legacy_headers_remain_readable() {
-        let mut header = [0u8; HEADER_LEN];
-        header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        header[4..8].copy_from_slice(&6_347u32.to_le_bytes());
-        header[8..12].copy_from_slice(&0x1234_5678u32.to_le_bytes());
-        header[12..18].copy_from_slice(b"legacy");
-        let metadata = decode_header(&header).unwrap();
-        assert_eq!(metadata.name(), "legacy");
-        assert_eq!(metadata.format_version, 1);
     }
 
     #[test]

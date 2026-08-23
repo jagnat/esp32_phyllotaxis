@@ -19,7 +19,6 @@ pub struct SlotInfo {
     pub abi_version: u32,
     pub caps: u32,
     pub color: [u8; 3],
-    pub format_version: u16,
 }
 
 impl SlotInfo {
@@ -102,7 +101,6 @@ impl Gallery {
             abi_version: metadata.abi_version,
             caps: metadata.caps,
             color: metadata.color,
-            format_version: metadata.format_version,
         })
     }
 

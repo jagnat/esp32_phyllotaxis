@@ -1,21 +1,19 @@
 # Sketch capacity and API readiness
 
-Measured on the 16 MiB ESP32-S3 board with firmware `7ba75f5`.
+Measured on the 16 MiB ESP32-S3 board.
 
 ## Capacity
 
-The original gallery was limited to 16 sketches by configuration, not by the
-hardware. The hardened layout now provides 100:
+The gallery provides 100 fixed-size slots:
 
 - flash after the 4 MiB factory app partition: 12,517,376 bytes (11.9375 MiB)
-- original gallery: 16 x 32 KiB = 524,288 bytes
 - maximum module payload per slot: 32,704 bytes (32 KiB minus 64-byte header)
 - 100 slots: 3,276,800 bytes (3.125 MiB)
 - space remaining after 100 slots: 9,240,576 bytes (8.8125 MiB)
 - absolute fixed-slot maximum if all remaining flash were consumed: 382 slots
 
-The reference Rust WASM sketch is 6,347 bytes in release mode, so 100 copies
-contain 634,700 bytes of module data but occupy 3.125 MiB in the fixed-slot
+The reference Rust WASM sketch is 6,342 bytes in release mode, so 100 copies
+contain 634,200 bytes of module data but occupy 3.125 MiB in the fixed-slot
 layout. Its debug build is 2,870,425 bytes and cannot be uploaded; contributor
 instructions must require an optimized release build.
 
@@ -45,7 +43,7 @@ few KiB.
 
 ## API hardening status
 
-The WASM ABI v2 document and reference project are suitable for trusted sketch
+The WASM ABI document and reference project are suitable for trusted sketch
 authors. Modules have no WASI access, receive only the documented `phyllo`
 imports, run with fuel metering, and are isolated from the native firmware.
 
@@ -59,9 +57,8 @@ the initial audit:
   ABI, capabilities, exported types, pointers, memory, tables, and start code;
 - load/start fuel is capped at 500K, frame fuel at 120K, guest memory at 1 MiB,
   and table elements at 1,024;
-- the API is under `/api/v2`, returns JSON, and uses meaningful status codes;
-- v2 slot metadata is versioned and committed last after the CRC-protected
-  payload; legacy v1 records remain readable;
+- the API is under `/api`, returns JSON, and uses meaningful status codes;
+- slot metadata is committed last after the CRC-protected payload;
 - the partition and implementation provide 100 slots.
 
 Remaining boundaries: HTTP has no TLS, so bearer access is appropriate only on

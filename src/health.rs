@@ -85,7 +85,7 @@ pub fn json() -> String {
     let uptime_ms = Instant::now().as_millis();
     format!(
         concat!(
-            "{{\"api_version\":2,\"firmware\":\"{}\",",
+            "{{\"firmware\":\"{}\",",
             "\"uptime_ms\":{},\"reset_reason\":\"{}\",",
             "\"active_sketch\":{},\"running_sketch\":{},",
             "\"ui_mode\":{},\"menu_cursor\":{},\"rendered_frames\":{},",
