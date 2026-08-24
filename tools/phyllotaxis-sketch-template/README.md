@@ -34,6 +34,7 @@ again to the same slot atomically replaces that sketch; deleting erases it.
 - `input.audio()` exposes four arrays of six audio bands when AUDIO is enabled;
 - encoder/button methods work when INPUT is enabled;
 - `phyllo::hsv`, `agc`, and `random` provide common utilities.
+- `phyllo::return_to_main()` hands control back to the unattended display.
 
 Set `CAPABILITIES` to `NONE`, `AUDIO`, `INPUT`, or `AUDIO | INPUT`. A sketch
 with INPUT requires a five-second button hold to exit; otherwise a click exits.

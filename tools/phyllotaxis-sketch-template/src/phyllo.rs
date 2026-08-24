@@ -174,6 +174,8 @@ unsafe extern "C" {
     fn host_agc(channel: i32, energy: f32) -> f32;
     #[link_name = "rand"]
     fn host_rand() -> f32;
+    #[link_name = "return_to_main"]
+    fn host_return_to_main();
 }
 
 /// Physical LED position on the unit phyllotaxis disk.
@@ -199,6 +201,11 @@ pub fn agc(channel: usize, energy: f32) -> f32 {
 /// Pseudorandom value in 0..1.
 pub fn random() -> f32 {
     unsafe { host_rand() }
+}
+
+/// Ask the board to leave this sketch and resume its unattended display.
+pub fn return_to_main() {
+    unsafe { host_return_to_main() }
 }
 
 pub fn clamp01(value: f32) -> f32 {

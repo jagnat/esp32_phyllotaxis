@@ -11,7 +11,7 @@ use embedded_storage::{ReadStorage, Storage};
 use esp_bootloader_esp_idf::partitions;
 use esp_storage::FlashStorage;
 
-use crate::gallery_format::{crc32, decode_header, encode_header, Metadata, HEADER_LEN};
+use crate::gallery_format::{HEADER_LEN, Metadata, crc32, decode_header, encode_header};
 
 pub use crate::gallery_format::{MAX_SKETCH, SLOT_SIZE, SLOTS};
 
@@ -42,6 +42,7 @@ static REVISION: AtomicU32 = AtomicU32::new(0);
 pub struct MenuEntry {
     pub slot: usize,
     pub color: [u8; 3],
+    pub caps: u32,
 }
 
 pub fn init(flash: esp_hal::peripherals::FLASH<'static>) {
@@ -72,8 +73,14 @@ pub fn init(flash: esp_hal::peripherals::FLASH<'static>) {
         warn!("gallery: sketches partition too small: {} bytes", len);
         return;
     }
-    info!("gallery: sketches partition at {:#x} ({} slots)", offset, SLOTS);
-    let gallery = Gallery { flash, base: offset };
+    info!(
+        "gallery: sketches partition at {:#x} ({} slots)",
+        offset, SLOTS
+    );
+    let gallery = Gallery {
+        flash,
+        base: offset,
+    };
     // init runs before the executor, so try_lock cannot fail
     if let Ok(mut g) = GALLERY.try_lock() {
         *g = Some(gallery);
@@ -127,6 +134,7 @@ pub async fn menu_entries() -> Option<Vec<MenuEntry>> {
                 info.map(|info| MenuEntry {
                     slot,
                     color: info.color,
+                    caps: info.caps,
                 })
             })
             .collect(),
@@ -200,20 +208,16 @@ impl Gallery {
         if data.len() > MAX_SKETCH {
             return Err(Error::TooBig);
         }
-        let header = encode_header(name, data.len(), crc32(data), caps, color)
-            .ok_or(Error::BadName)?;
+        let header =
+            encode_header(name, data.len(), crc32(data), caps, color).ok_or(Error::BadName)?;
         let off = self.slot_off(slot);
 
         // Erase the complete slot first, then commit the header last. Yielding
         // between short flash operations lets rendering feed its watchdog and
         // lets the audio task drain its DMA ring.
         for sector in (off..off + SLOT_SIZE as u32).step_by(FlashStorage::SECTOR_SIZE as usize) {
-            NorFlash::erase(
-                &mut self.flash,
-                sector,
-                sector + FlashStorage::SECTOR_SIZE,
-            )
-            .map_err(|_| Error::Flash)?;
+            NorFlash::erase(&mut self.flash, sector, sector + FlashStorage::SECTOR_SIZE)
+                .map_err(|_| Error::Flash)?;
             Timer::after(Duration::from_millis(1)).await;
         }
 
@@ -225,13 +229,11 @@ impl Gallery {
             let address = payload_off + written as u32;
             let sector_remaining =
                 (FlashStorage::SECTOR_SIZE - address % FlashStorage::SECTOR_SIZE) as usize;
-            let len = (aligned_len - written).min(WRITE_CHUNK).min(sector_remaining);
-            NorFlash::write(
-                &mut self.flash,
-                address,
-                &data[written..written + len],
-            )
-            .map_err(|_| Error::Flash)?;
+            let len = (aligned_len - written)
+                .min(WRITE_CHUNK)
+                .min(sector_remaining);
+            NorFlash::write(&mut self.flash, address, &data[written..written + len])
+                .map_err(|_| Error::Flash)?;
             written += len;
             Timer::after(Duration::from_millis(1)).await;
         }

@@ -21,5 +21,5 @@ pub fn render(input: &Input<'_>, frame: &mut Frame<'_>) {
     // Available when requested in CAPABILITIES:
     // input.audio(); input.encoder_delta(); input.encoder_position();
     // input.button_held(); input.button_released();
-    // Also available: phyllo::agc(channel, value), phyllo::random().
+    // Also: phyllo::agc(channel, value), random(), return_to_main().
 }

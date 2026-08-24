@@ -2,9 +2,9 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec::Vec;
-use defmt::{info, warn, Debug2Format};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use defmt::{Debug2Format, info, warn};
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use libm::sinf;
 use wasmi::{
@@ -20,6 +20,8 @@ use crate::util::{LED_POSITIONS, NUM_LEDS, Rgb};
 /// When false, the i2s task keeps draining DMA but skips the FFT/feature
 /// pipeline, freeing that CPU for a guest that declared no audio caps.
 pub static AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Set by an active guest that wants to hand control back to the idle display.
+pub static RETURN_TO_MAIN: AtomicBool = AtomicBool::new(false);
 
 pub const CAP_AUDIO_FEATURES: u32 = 1;
 pub const CAP_WANTS_INPUT: u32 = 4;
@@ -198,14 +200,21 @@ impl SketchInstance {
                 }
             },
         );
-        let _ = linker.func_wrap("phyllo", "rand", |mut caller: Caller<'_, HostState>| -> f32 {
-            let s = &mut caller.data_mut().rng;
-            let mut x = *s;
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            *s = x;
-            (x >> 8) as f32 / (1u32 << 24) as f32
+        let _ = linker.func_wrap(
+            "phyllo",
+            "rand",
+            |mut caller: Caller<'_, HostState>| -> f32 {
+                let s = &mut caller.data_mut().rng;
+                let mut x = *s;
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                *s = x;
+                (x >> 8) as f32 / (1u32 << 24) as f32
+            },
+        );
+        let _ = linker.func_wrap("phyllo", "return_to_main", || {
+            RETURN_TO_MAIN.store(true, Ordering::Release);
         });
 
         let instance = linker
@@ -301,7 +310,7 @@ impl SketchInstance {
         match f.call(&mut self.store, ()) {
             Ok(()) => {}
             Err(e) if e.as_trap_code() == Some(TrapCode::OutOfFuel) => {
-                return Err(FrameError::Overrun)
+                return Err(FrameError::Overrun);
             }
             Err(_) => return Err(FrameError::Trap),
         }
@@ -396,7 +405,11 @@ impl Sketch for WasmSketch {
             );
             match loaded {
                 Ok(inst) => {
-                    info!("wasm: loaded module ({} bytes, caps {:#x})", bytes.len(), inst.caps);
+                    info!(
+                        "wasm: loaded module ({} bytes, caps {:#x})",
+                        bytes.len(),
+                        inst.caps
+                    );
                     self.inst = Some(inst);
                     self.dead = false;
                     self.overruns = 0;
@@ -410,7 +423,11 @@ impl Sketch for WasmSketch {
         }
 
         let Some(inst) = self.inst.as_mut() else {
-            let color = if self.dead { Rgb::new(255, 0, 0) } else { Rgb::new(160, 0, 255) };
+            let color = if self.dead {
+                Rgb::new(255, 0, 0)
+            } else {
+                Rgb::new(160, 0, 255)
+            };
             Self::breath(leds, p, color);
             AUDIO_ENABLED.store(true, Ordering::Relaxed);
             return;
@@ -421,10 +438,7 @@ impl Sketch for WasmSketch {
             Self::breath(leds, p, Rgb::new(255, 0, 0));
             return;
         }
-        AUDIO_ENABLED.store(
-            inst.caps & CAP_AUDIO_FEATURES != 0,
-            Ordering::Relaxed,
-        );
+        AUDIO_ENABLED.store(inst.caps & CAP_AUDIO_FEATURES != 0, Ordering::Relaxed);
 
         let frame = InputFrame {
             dt_us: p.dt_us,
@@ -458,7 +472,11 @@ impl Sketch for WasmSketch {
             }
         }
         for (i, led) in leds.iter_mut().enumerate() {
-            *led = Rgb::new(self.frame[3 * i], self.frame[3 * i + 1], self.frame[3 * i + 2]);
+            *led = Rgb::new(
+                self.frame[3 * i],
+                self.frame[3 * i + 1],
+                self.frame[3 * i + 2],
+            );
         }
     }
 }

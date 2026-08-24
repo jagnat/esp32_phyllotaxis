@@ -20,6 +20,7 @@ pub static RAW_PINS: AtomicU8 = AtomicU8::new(0);
 const QDEC: [i8; 16] = [0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0];
 
 const DEBOUNCE: Duration = Duration::from_millis(20);
+const STARTUP_SETTLE: Duration = Duration::from_millis(100);
 
 fn ab(a: &Input, b: &Input) -> u8 {
     ((a.is_high() as u8) << 1) | (b.is_high() as u8)
@@ -30,11 +31,33 @@ fn ab(a: &Input, b: &Input) -> u8 {
 /// committed only at the rest position (both lines high).
 #[embassy_executor::task]
 pub async fn encoder_task(a: Input<'static>, b: Input<'static>, btn: Input<'static>) {
-    let mut prev = ab(&a, &b);
+    // Do not turn power-up transients (or a button held while powering on) into
+    // a release/detent event. Arm only after every input has remained at its
+    // pull-up idle level for a short, continuous interval.
+    let mut idle_since = Instant::now();
+    loop {
+        let cur = ab(&a, &b);
+        let raw = btn.is_high();
+        RAW_PINS.store((cur << 1) | raw as u8, Ordering::Relaxed);
+        if cur == 0b11 && raw {
+            if Instant::now() - idle_since >= STARTUP_SETTLE {
+                break;
+            }
+        } else {
+            idle_since = Instant::now();
+        }
+        Timer::after(Duration::from_millis(1)).await;
+    }
+
+    ENCODER_DELTA.store(0, Ordering::Relaxed);
+    BUTTON_RELEASED.store(false, Ordering::Relaxed);
+    BUTTON_PRESSED.store(false, Ordering::Relaxed);
+
+    let mut prev = 0b11;
     let mut accum: i8 = 0;
 
-    let mut btn_stable = btn.is_high();
-    let mut btn_last = btn_stable;
+    let mut btn_stable = true;
+    let mut btn_last = true;
     let mut btn_change = Instant::now();
 
     loop {

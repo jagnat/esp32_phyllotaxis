@@ -11,35 +11,35 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use esp_hal::Async;
 use esp_hal::clock::CpuClock;
-use esp_hal::dma_buffers;
 use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+use esp_hal::dma_buffers;
+use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::i2s::master::{Config, I2s, I2sRx};
+use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
 use esp_hal::time::{Duration as HalDuration, Rate};
 use esp_hal::timer::timg::{MwdtStage, TimerGroup, Wdt};
-use esp_hal::gpio::{Input, InputConfig, Pull};
-use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
-use esp_hal::Async;
-use esp_hal::i2s::master::{Config, I2s, I2sRx};
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer, Instant};
-use embassy_sync::signal::Signal;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant, Timer};
 
 use static_cell::StaticCell;
 
-use esp32_phyllotaxis::util::*;
-use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::audio::*;
-use esp32_phyllotaxis::input::{encoder_task, BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA};
+use esp32_phyllotaxis::input::{BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA, encoder_task};
 use esp32_phyllotaxis::net::{self, SKETCH_SELECT};
+use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::ui_state::{UiInput, UiMode, UiState};
+use esp32_phyllotaxis::util::*;
 
-use esp_println as _;
-use defmt::info;
 use defmt::error;
+use defmt::info;
 use defmt::unwrap;
 use defmt::warn;
+use esp_println as _;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -132,15 +132,19 @@ async fn main(spawner: Spawner) -> ! {
     let i2s = I2s::new(
         peripherals.I2S0,
         peripherals.DMA_CH0,
-        Config::new_tdm_philips().with_sample_rate(Rate::from_hz(32000)).with_data_format(esp_hal::i2s::master::DataFormat::Data32Channel32)
-    ).unwrap().into_async();
+        Config::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(32000))
+            .with_data_format(esp_hal::i2s::master::DataFormat::Data32Channel32),
+    )
+    .unwrap()
+    .into_async();
     let i2s_rx = i2s
         .i2s_rx
         .with_bclk(peripherals.GPIO7)
         .with_ws(peripherals.GPIO6)
         .with_din(peripherals.GPIO5)
         .build(rx_descs);
-    
+
     info!("Embassy initialized!");
 
     let (spi_rx, spi_rx_descs, spi_tx, spi_tx_descs) = dma_buffers!(4, SPI_FRAME);
@@ -183,18 +187,24 @@ async fn main(spawner: Spawner) -> ! {
 const SCENE_TRANSITION_US: u64 = 250_000;
 const MAIN_TARGET: usize = 0;
 
-async fn gallery_menu() -> (Vec<usize>, Vec<Rgb>) {
+async fn gallery_menu() -> (Vec<usize>, Vec<Rgb>, Vec<usize>) {
     let mut targets = vec![MAIN_TARGET];
     let mut colors = vec![SketchBank::MAIN_COLOR];
+    let mut attract = vec![MAIN_TARGET];
     if let Some(entries) = esp32_phyllotaxis::gallery::menu_entries().await {
         targets.reserve(entries.len());
         colors.reserve(entries.len());
+        attract.reserve(entries.len());
         for entry in entries {
-            targets.push(entry.slot + 1);
+            let target = entry.slot + 1;
+            targets.push(target);
             colors.push(Rgb::new(entry.color[0], entry.color[1], entry.color[2]));
+            if entry.caps & esp32_phyllotaxis::wasm::CAP_WANTS_INPUT == 0 {
+                attract.push(target);
+            }
         }
     }
-    (targets, colors)
+    (targets, colors, attract)
 }
 
 #[embassy_executor::task]
@@ -207,17 +217,18 @@ async fn render(
     let mut bank = SketchBank::new();
     let mut next = started;
     let mut frame_index = 0u64;
-    let mut led_buf = [Rgb::new(0,0,0); NUM_LEDS];
+    let mut led_buf = [Rgb::new(0, 0, 0); NUM_LEDS];
     let mut last_audio = AudioFeatures::default();
     let mut tx_buf = [0u8; SPI_FRAME];
     let mut power_limiter = esp32_phyllotaxis::power::LedPowerLimiter::new();
-    let (menu_targets, mut menu_colors) = gallery_menu().await;
+    let (menu_targets, mut menu_colors, attract_targets) = gallery_menu().await;
     let mut gallery_revision = esp32_phyllotaxis::gallery::revision();
     let mut ui = UiState::new(
         &menu_targets,
         esp32_phyllotaxis::gallery::SLOTS + 1,
         MAIN_TARGET,
     );
+    ui.set_attract_slots(&attract_targets);
     let mut loaded_gallery_slot = None;
     let mut last_scene = [Rgb::new(0, 0, 0); NUM_LEDS];
     let mut transition_from = last_scene;
@@ -227,10 +238,9 @@ async fn render(
             error!("audio DMA made no progress for 10s; rebooting");
             esp32_phyllotaxis::health::request_reboot(2);
         }
-        if esp32_phyllotaxis::health::REBOOT_REQUESTED.swap(
-            false,
-            core::sync::atomic::Ordering::Acquire,
-        ) {
+        if esp32_phyllotaxis::health::REBOOT_REQUESTED
+            .swap(false, core::sync::atomic::Ordering::Acquire)
+        {
             led_buf.fill(Rgb::new(0, 0, 0));
             encode(&led_buf, &mut tx_buf);
             let _ = spi.write_async(&tx_buf).await;
@@ -242,16 +252,21 @@ async fn render(
         let dt_us = esp32_phyllotaxis::timebase::clamp_dt_us((now - last).as_micros());
         last = now;
 
-        if let Some(a) = AUDIO.try_take() { last_audio = a; }
+        if let Some(a) = AUDIO.try_take() {
+            last_audio = a;
+        }
 
         let detents = ENCODER_DELTA.swap(0, core::sync::atomic::Ordering::Relaxed);
         let released = BUTTON_RELEASED.swap(false, core::sync::atomic::Ordering::Relaxed);
         let pressed = BUTTON_PRESSED.load(core::sync::atomic::Ordering::Relaxed);
         let selected = SKETCH_SELECT.swap(-1, core::sync::atomic::Ordering::Relaxed);
+        let guest_return = esp32_phyllotaxis::wasm::RETURN_TO_MAIN
+            .swap(false, core::sync::atomic::Ordering::Acquire);
         let revision = esp32_phyllotaxis::gallery::revision();
         if revision != gallery_revision {
-            let (targets, colors) = gallery_menu().await;
+            let (targets, colors, attract) = gallery_menu().await;
             ui.set_menu_slots(&targets);
+            ui.set_attract_slots(&attract);
             menu_colors = colors;
             loaded_gallery_slot = None;
             gallery_revision = revision;
@@ -259,9 +274,17 @@ async fn render(
         let elapsed_us = (now - started).as_micros();
         let ui_frame = ui.update(
             elapsed_us,
-            UiInput { detents, pressed, released },
+            UiInput {
+                detents,
+                pressed,
+                released,
+            },
             bank.input_claimed(),
-            (selected >= 0).then_some(selected as usize),
+            if guest_return {
+                Some(MAIN_TARGET)
+            } else {
+                (selected >= 0).then_some(selected as usize)
+            },
         );
         if ui_frame.visual_changed {
             transition_from = last_scene;
@@ -294,26 +317,25 @@ async fn render(
                 SketchBank::WASM_SLOT
             });
         }
-        esp32_phyllotaxis::health::ACTIVE_SKETCH.store(
-            bank.active() as u32,
-            core::sync::atomic::Ordering::Relaxed,
-        );
-        esp32_phyllotaxis::health::RUNNING_SKETCH.store(
-            running_target as u32,
-            core::sync::atomic::Ordering::Relaxed,
-        );
+        esp32_phyllotaxis::health::ACTIVE_SKETCH
+            .store(bank.active() as u32, core::sync::atomic::Ordering::Relaxed);
+        esp32_phyllotaxis::health::RUNNING_SKETCH
+            .store(running_target as u32, core::sync::atomic::Ordering::Relaxed);
         esp32_phyllotaxis::health::UI_MODE.store(
             (ui_frame.mode == UiMode::Menu) as u32,
             core::sync::atomic::Ordering::Relaxed,
         );
         esp32_phyllotaxis::health::MENU_CURSOR.store(
-            ui_frame.menu_cursor.map_or(u32::MAX, |cursor| cursor as u32),
+            ui_frame
+                .menu_cursor
+                .map_or(u32::MAX, |cursor| cursor as u32),
             core::sync::atomic::Ordering::Relaxed,
         );
 
         // Only the wasm sketch may park the audio pipeline, and only while active.
         if bank.active() != SketchBank::WASM_SLOT {
-            esp32_phyllotaxis::wasm::AUDIO_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+            esp32_phyllotaxis::wasm::AUDIO_ENABLED
+                .store(true, core::sync::atomic::Ordering::Relaxed);
         }
 
         let params = SketchParams {
@@ -328,12 +350,7 @@ async fn render(
         };
         bank.render(&mut led_buf, &params);
         if let Some(position) = ui_frame.menu_position {
-            esp32_phyllotaxis::menu::render(
-                &mut led_buf,
-                position,
-                &menu_colors,
-                elapsed_us,
-            );
+            esp32_phyllotaxis::menu::render(&mut led_buf, position, &menu_colors, elapsed_us);
         }
         if let Some(transition_start) = transition_started_us {
             let transition_elapsed = elapsed_us.saturating_sub(transition_start);
@@ -357,10 +374,8 @@ async fn render(
             error!("spi tx err: {}", e);
         }
         watchdog.feed();
-        esp32_phyllotaxis::health::RENDERED_FRAMES.fetch_add(
-            1,
-            core::sync::atomic::Ordering::Relaxed,
-        );
+        esp32_phyllotaxis::health::RENDERED_FRAMES
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         frame_index = frame_index.wrapping_add(1);
 
         next += Duration::from_micros(esp32_phyllotaxis::timebase::FRAME_PERIOD_US);
@@ -415,10 +430,8 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4
         Ok(t) => t,
         Err(e) => {
             error!("i2s circular init err: {}", e);
-            esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
-                1,
-                core::sync::atomic::Ordering::Relaxed,
-            );
+            esp32_phyllotaxis::health::AUDIO_DMA_ERRORS
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             esp32_phyllotaxis::health::request_reboot(1);
             return;
         }
@@ -433,10 +446,8 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4
                 // An overrun (Late) wedges the circular transfer permanently;
                 // esp-hal has no restart API, so reboot the peripheral cleanly.
                 error!("i2s pop err: {}; requesting reboot", e);
-                esp32_phyllotaxis::health::AUDIO_DMA_ERRORS.fetch_add(
-                    1,
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                esp32_phyllotaxis::health::AUDIO_DMA_ERRORS
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 esp32_phyllotaxis::health::request_reboot(1);
                 return;
             }
@@ -457,7 +468,8 @@ async fn i2s_receive(i2s_rx: I2sRx<'static, Async>, buf: &'static mut [u8; 8 * 4
                 sum += decode_left_sample(&stage[..WINDOW], i) as i64;
             }
             let dc = (sum as f32 / 512.0) / 8388608.0;
-            let feats = proc.process(|i| decode_left_sample(&stage[..WINDOW], i) as f32 / 8388608.0 - dc);
+            let feats =
+                proc.process(|i| decode_left_sample(&stage[..WINDOW], i) as f32 / 8388608.0 - dc);
             AUDIO.signal(feats);
             stage.copy_within(WINDOW..fill, 0);
             fill -= WINDOW;

@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 
 pub const EXIT_HOLD_US: u64 = 5_000_000;
 pub const MENU_TIMEOUT_US: u64 = 15_000_000;
+pub const ATTRACT_INTERVAL_US: u64 = 60 * 1_000_000;
+pub const AUTO_RETURN_US: u64 = 5 * 60 * 1_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiMode {
@@ -33,12 +35,16 @@ pub struct UiOutput {
 
 pub struct UiState {
     menu_slots: Vec<usize>,
+    attract_slots: Vec<usize>,
     slot_count: usize,
+    default_slot: usize,
     mode: UiMode,
     running_slot: usize,
     menu_position: i64,
     menu_entered_us: u64,
     last_menu_input_us: u64,
+    last_activity_us: u64,
+    last_attract_us: u64,
     press_started_us: Option<u64>,
     suppress_release: bool,
 }
@@ -48,9 +54,12 @@ impl UiState {
         assert!(!menu_slots.is_empty());
         assert!(default_slot < slot_count);
         assert!(menu_slots.iter().all(|slot| *slot < slot_count));
+        assert!(menu_slots.contains(&default_slot));
         Self {
             menu_slots: menu_slots.to_vec(),
+            attract_slots: alloc::vec![default_slot],
             slot_count,
+            default_slot,
             mode: UiMode::Running,
             running_slot: default_slot,
             menu_position: menu_slots
@@ -59,6 +68,8 @@ impl UiState {
                 .unwrap_or(0) as i64,
             menu_entered_us: 0,
             last_menu_input_us: 0,
+            last_activity_us: 0,
+            last_attract_us: 0,
             press_started_us: None,
             suppress_release: false,
         }
@@ -67,9 +78,16 @@ impl UiState {
     pub fn set_menu_slots(&mut self, menu_slots: &[usize]) {
         assert!(!menu_slots.is_empty());
         assert!(menu_slots.iter().all(|slot| *slot < self.slot_count));
+        assert!(menu_slots.contains(&self.default_slot));
         let visible_slot = self.render_slot();
         self.menu_slots.clear();
         self.menu_slots.extend_from_slice(menu_slots);
+        let installed_slots = &self.menu_slots;
+        self.attract_slots
+            .retain(|slot| installed_slots.contains(slot));
+        if !self.attract_slots.contains(&self.default_slot) {
+            self.attract_slots.insert(0, self.default_slot);
+        }
         if !self.menu_slots.contains(&self.running_slot) {
             self.running_slot = self.menu_slots[0];
             self.mode = UiMode::Running;
@@ -85,6 +103,19 @@ impl UiState {
             })
             .unwrap_or(0);
         self.align_position_to(anchor);
+    }
+
+    /// Set the unattended carousel. It must contain main and may only contain
+    /// currently installed menu entries.
+    pub fn set_attract_slots(&mut self, attract_slots: &[usize]) {
+        assert!(attract_slots.contains(&self.default_slot));
+        assert!(
+            attract_slots
+                .iter()
+                .all(|slot| self.menu_slots.contains(slot))
+        );
+        self.attract_slots.clear();
+        self.attract_slots.extend_from_slice(attract_slots);
     }
 
     pub fn force_select(&mut self, slot: usize) {
@@ -113,8 +144,7 @@ impl UiState {
     }
 
     fn menu_cursor(&self) -> usize {
-        self.menu_position
-            .rem_euclid(self.menu_slots.len() as i64) as usize
+        self.menu_position.rem_euclid(self.menu_slots.len() as i64) as usize
     }
 
     /// Move to the nearest occurrence of a sketch without throwing away the
@@ -141,8 +171,15 @@ impl UiState {
         let old_mode = self.mode;
         let old_render_slot = self.render_slot();
         let old_position = self.menu_position;
+        let input_started = input.pressed && self.press_started_us.is_none();
+        let input_activity = input.detents != 0 || input.released || input_started;
 
-        if input.pressed && self.press_started_us.is_none() {
+        if input_activity {
+            self.last_activity_us = now_us;
+            self.last_attract_us = now_us;
+        }
+
+        if input_started {
             self.press_started_us = Some(now_us);
         }
 
@@ -152,13 +189,15 @@ impl UiState {
             self.running_slot = slot;
             self.mode = UiMode::Running;
             self.suppress_release = input.pressed || input.released;
+            self.last_activity_us = now_us;
+            self.last_attract_us = now_us;
         } else {
             match self.mode {
                 UiMode::Running if sketch_claims_input => {
                     let held_long_enough = input.pressed
-                        && self.press_started_us.is_some_and(|started| {
-                            now_us.saturating_sub(started) >= EXIT_HOLD_US
-                        });
+                        && self
+                            .press_started_us
+                            .is_some_and(|started| now_us.saturating_sub(started) >= EXIT_HOLD_US);
                     if held_long_enough {
                         self.enter_menu(now_us, 0);
                         self.suppress_release = true;
@@ -200,6 +239,30 @@ impl UiState {
             }
         }
 
+        if self.mode == UiMode::Running
+            && self.running_slot != self.default_slot
+            && !self.attract_slots.contains(&self.running_slot)
+            && now_us.saturating_sub(self.last_activity_us) >= AUTO_RETURN_US
+        {
+            self.running_slot = self.default_slot;
+            self.suppress_release = false;
+            self.last_attract_us = now_us;
+        }
+
+        if self.mode == UiMode::Running
+            && self.attract_slots.len() > 1
+            && self.attract_slots.contains(&self.running_slot)
+            && now_us.saturating_sub(self.last_attract_us) >= ATTRACT_INTERVAL_US
+        {
+            let cursor = self
+                .attract_slots
+                .iter()
+                .position(|slot| *slot == self.running_slot)
+                .unwrap_or(0);
+            self.running_slot = self.attract_slots[(cursor + 1) % self.attract_slots.len()];
+            self.last_attract_us = now_us;
+        }
+
         if !input.pressed {
             self.press_started_us = None;
         }
@@ -238,7 +301,15 @@ mod tests {
 
     #[test]
     fn turning_opens_menu_and_previews_next_public_sketch() {
-        let out = state().update(100, UiInput { detents: 1, ..UiInput::default() }, false, None);
+        let out = state().update(
+            100,
+            UiInput {
+                detents: 1,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
         assert_eq!(out.mode, UiMode::Menu);
         assert_eq!(out.menu_cursor, Some(1));
         assert_eq!(out.render_slot, 3);
@@ -248,8 +319,24 @@ mod tests {
     #[test]
     fn menu_click_confirms_preview() {
         let mut ui = state();
-        ui.update(100, UiInput { detents: -1, ..UiInput::default() }, false, None);
-        let out = ui.update(200, UiInput { released: true, ..UiInput::default() }, false, None);
+        ui.update(
+            100,
+            UiInput {
+                detents: -1,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
+        let out = ui.update(
+            200,
+            UiInput {
+                released: true,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
         assert_eq!(out.mode, UiMode::Running);
         assert_eq!(out.running_slot, 6);
         assert!(out.visual_changed);
@@ -258,7 +345,15 @@ mod tests {
     #[test]
     fn menu_timeout_cancels_selection() {
         let mut ui = state();
-        ui.update(100, UiInput { detents: 1, ..UiInput::default() }, false, None);
+        ui.update(
+            100,
+            UiInput {
+                detents: 1,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
         let out = ui.update(100 + MENU_TIMEOUT_US, UiInput::default(), false, None);
         assert_eq!(out.mode, UiMode::Running);
         assert_eq!(out.running_slot, 0);
@@ -267,7 +362,16 @@ mod tests {
     #[test]
     fn claimed_sketch_receives_short_input() {
         let mut ui = UiState::new(MENU, 7, 6);
-        let out = ui.update(100, UiInput { detents: 2, released: true, ..UiInput::default() }, true, None);
+        let out = ui.update(
+            100,
+            UiInput {
+                detents: 2,
+                released: true,
+                ..UiInput::default()
+            },
+            true,
+            None,
+        );
         assert_eq!(out.mode, UiMode::Running);
         assert_eq!(out.sketch_input.detents, 2);
         assert!(out.sketch_input.released);
@@ -276,10 +380,34 @@ mod tests {
     #[test]
     fn long_hold_escapes_claimed_sketch_without_confirming_on_release() {
         let mut ui = UiState::new(MENU, 7, 6);
-        ui.update(100, UiInput { pressed: true, ..UiInput::default() }, true, None);
-        let escaped = ui.update(100 + EXIT_HOLD_US, UiInput { pressed: true, ..UiInput::default() }, true, None);
+        ui.update(
+            100,
+            UiInput {
+                pressed: true,
+                ..UiInput::default()
+            },
+            true,
+            None,
+        );
+        let escaped = ui.update(
+            100 + EXIT_HOLD_US,
+            UiInput {
+                pressed: true,
+                ..UiInput::default()
+            },
+            true,
+            None,
+        );
         assert_eq!(escaped.mode, UiMode::Menu);
-        let released = ui.update(200 + EXIT_HOLD_US, UiInput { released: true, ..UiInput::default() }, false, None);
+        let released = ui.update(
+            200 + EXIT_HOLD_US,
+            UiInput {
+                released: true,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
         assert_eq!(released.mode, UiMode::Menu);
     }
 
@@ -291,6 +419,73 @@ mod tests {
         assert_eq!(selected.running_slot, 6);
         let ignored = ui.update(200, UiInput::default(), false, Some(5));
         assert_eq!(ignored.running_slot, 6);
+    }
+
+    #[test]
+    fn gallery_sketch_returns_to_main_after_five_inactive_minutes() {
+        let mut ui = state();
+        ui.update(10, UiInput::default(), false, Some(6));
+        let before = ui.update(10 + AUTO_RETURN_US - 1, UiInput::default(), false, None);
+        assert_eq!(before.running_slot, 6);
+        let returned = ui.update(10 + AUTO_RETURN_US, UiInput::default(), false, None);
+        assert_eq!(returned.mode, UiMode::Running);
+        assert_eq!(returned.running_slot, 0);
+        assert_eq!(returned.render_slot, 0);
+    }
+
+    #[test]
+    fn physical_input_postpones_automatic_return() {
+        let mut ui = state();
+        ui.update(10, UiInput::default(), false, Some(6));
+        ui.update(
+            AUTO_RETURN_US - 10,
+            UiInput {
+                detents: 1,
+                ..UiInput::default()
+            },
+            true,
+            None,
+        );
+        let active = ui.update(AUTO_RETURN_US + 20, UiInput::default(), true, None);
+        assert_eq!(active.running_slot, 6);
+    }
+
+    #[test]
+    fn idle_attract_mode_cycles_main_and_passive_sketches() {
+        let mut ui = state();
+        ui.set_attract_slots(&[0, 3]);
+        let before = ui.update(ATTRACT_INTERVAL_US - 1, UiInput::default(), false, None);
+        assert_eq!(before.running_slot, 0);
+        let passive = ui.update(ATTRACT_INTERVAL_US, UiInput::default(), false, None);
+        assert_eq!(passive.running_slot, 3);
+        let main = ui.update(2 * ATTRACT_INTERVAL_US, UiInput::default(), false, None);
+        assert_eq!(main.running_slot, 0);
+    }
+
+    #[test]
+    fn input_sketches_are_not_in_the_attract_cycle() {
+        let mut ui = state();
+        ui.set_attract_slots(&[0, 3]);
+        ui.update(1, UiInput::default(), true, Some(6));
+        let active = ui.update(ATTRACT_INTERVAL_US * 2, UiInput::default(), true, None);
+        assert_eq!(active.running_slot, 6);
+    }
+
+    #[test]
+    fn physical_input_postpones_the_next_attract_change() {
+        let mut ui = state();
+        ui.set_attract_slots(&[0, 3]);
+        ui.update(
+            ATTRACT_INTERVAL_US - 10,
+            UiInput {
+                released: true,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
+        let still_main = ui.update(ATTRACT_INTERVAL_US + 10, UiInput::default(), false, None);
+        assert_eq!(still_main.running_slot, 0);
     }
 
     #[test]
@@ -337,7 +532,10 @@ mod tests {
         let mut ui = UiState::new(MANY, 7, 0);
         let forward = ui.update(
             100,
-            UiInput { detents: 5, ..UiInput::default() },
+            UiInput {
+                detents: 5,
+                ..UiInput::default()
+            },
             false,
             None,
         );
@@ -346,7 +544,10 @@ mod tests {
         assert_eq!(forward.render_slot, 5);
         let wrapped = ui.update(
             200,
-            UiInput { detents: 3, ..UiInput::default() },
+            UiInput {
+                detents: 3,
+                ..UiInput::default()
+            },
             false,
             None,
         );
@@ -362,12 +563,18 @@ mod tests {
         for expected_position in 1..=7 {
             let out = ui.update(
                 expected_position as u64 * 100,
-                UiInput { detents: 1, ..UiInput::default() },
+                UiInput {
+                    detents: 1,
+                    ..UiInput::default()
+                },
                 false,
                 None,
             );
             assert_eq!(out.menu_position, Some(expected_position));
-            assert_eq!(out.menu_cursor, Some(expected_position as usize % SIX.len()));
+            assert_eq!(
+                out.menu_cursor,
+                Some(expected_position as usize % SIX.len())
+            );
         }
     }
 }
