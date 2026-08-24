@@ -48,23 +48,34 @@ pub fn render(
     }
 }
 
-/// Blend a newly rendered linear-light scene from the previously displayed
-/// scene. Kept out of the async render future to avoid inflating its state and
-/// to sidestep an Xtensa LLVM vector-constant selection bug.
+/// Briefly fade the old scene to black, then bring up the newly rendered one.
+/// Kept out of the async render future to avoid inflating its state and to
+/// sidestep an Xtensa LLVM vector-constant selection bug.
 #[inline(never)]
-pub fn crossfade(
+pub fn fade_through_black(
     leds: &mut [Rgb; NUM_LEDS],
     from: &[Rgb; NUM_LEDS],
     elapsed_us: u64,
     duration_us: u64,
 ) -> bool {
-    if elapsed_us >= duration_us {
+    if duration_us == 0 || elapsed_us >= duration_us {
         return true;
     }
-    let t = elapsed_us as f32 / duration_us as f32;
-    let smooth = t * t * (3.0 - 2.0 * t);
-    for (led, previous) in leds.iter_mut().zip(from.iter()) {
-        *led = previous.lerp(*led, smooth);
+
+    let midpoint = (duration_us / 2).max(1);
+    if elapsed_us < midpoint {
+        let t = elapsed_us as f32 / midpoint as f32;
+        let brightness = 1.0 - t * t * (3.0 - 2.0 * t);
+        for (led, previous) in leds.iter_mut().zip(from.iter()) {
+            *led = Rgb::new(0, 0, 0).lerp(*previous, brightness);
+        }
+    } else {
+        let fade_in_us = duration_us - midpoint;
+        let t = (elapsed_us - midpoint) as f32 / fade_in_us as f32;
+        let brightness = t * t * (3.0 - 2.0 * t);
+        for led in leds.iter_mut() {
+            *led = Rgb::new(0, 0, 0).lerp(*led, brightness);
+        }
     }
     false
 }

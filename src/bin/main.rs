@@ -184,7 +184,7 @@ async fn main(spawner: Spawner) -> ! {
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
 
-const SCENE_TRANSITION_US: u64 = 250_000;
+const SCENE_TRANSITION_US: u64 = 220_000;
 const MAIN_TARGET: usize = 0;
 
 async fn gallery_menu() -> (Vec<usize>, Vec<Rgb>, Vec<usize>) {
@@ -354,7 +354,7 @@ async fn render(
         }
         if let Some(transition_start) = transition_started_us {
             let transition_elapsed = elapsed_us.saturating_sub(transition_start);
-            if esp32_phyllotaxis::menu::crossfade(
+            if esp32_phyllotaxis::menu::fade_through_black(
                 &mut led_buf,
                 &transition_from,
                 transition_elapsed,
