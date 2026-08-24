@@ -32,7 +32,7 @@ libm     = "0.2"
 esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "defmt", "esp-alloc"] }
 esp-alloc = "0.10.0"
 embassy-net = { version = "0.9.1", features = ["defmt", "dhcpv4", "dns", "medium-ethernet", "multicast", "proto-ipv4", "tcp", "udp"] }
-picoserve = { version = "0.19", features = ["embassy", "defmt", "ws", "alloc"] }
+picoserve = { version = "0.19", features = ["embassy", "defmt", "alloc"] }
 
 # --- wasm sketch gallery (phase 2) ---
 wasmi = { version = "1.1.0", default-features = false }

@@ -337,18 +337,12 @@ impl SketchInstance {
     }
 }
 
-static DEMO_MODULE: &[u8] = include_bytes!("../tools/testmod/testmod.wasm");
-
 static PENDING: Mutex<CriticalSectionRawMutex, RefCell<Option<Vec<u8>>>> =
     Mutex::new(RefCell::new(None));
 
 /// Hand a module to the wasm sketch slot; it loads it on its next frame.
 pub fn submit_module(bytes: Vec<u8>) {
     PENDING.lock(|p| *p.borrow_mut() = Some(bytes));
-}
-
-pub fn preload_demo() {
-    submit_module(DEMO_MODULE.to_vec());
 }
 
 const OVERRUN_LIMIT: u32 = 120;
@@ -443,7 +437,7 @@ impl Sketch for WasmSketch {
             audio: &p.audio,
         };
         let frame_started = Instant::now();
-        let result = inst.run_frame(&frame, &mut self.frame, false);
+        let result = inst.run_frame(&frame, &mut self.frame, p.preview);
         crate::health::record_max(
             &crate::health::WASM_FRAME_MAX_US,
             frame_started.elapsed().as_micros(),
@@ -467,54 +461,4 @@ impl Sketch for WasmSketch {
             *led = Rgb::new(self.frame[3 * i], self.frame[3 * i + 1], self.frame[3 * i + 2]);
         }
     }
-}
-
-pub fn spike() {
-    let t0 = Instant::now();
-    let mut inst = match SketchInstance::load(DEMO_MODULE, 0x1234_5678) {
-        Ok(i) => i,
-        Err(e) => {
-            warn!("wasm spike: load failed: {}", e);
-            return;
-        }
-    };
-    let load_us = t0.elapsed().as_micros();
-
-    let audio = AudioFeatures::default();
-    let input = InputFrame {
-        dt_us: 16_667,
-        elapsed_us: 1_000_000,
-        frame_index: 60,
-        encoder_pos: 0,
-        detents: 0,
-        pressed: false,
-        released: false,
-        audio: &audio,
-    };
-    let mut out = [0u8; FRAME_LEN];
-
-    let t0 = Instant::now();
-    let mut result = Ok(());
-    for _ in 0..10 {
-        result = inst.run_frame(&input, &mut out, false);
-        if result.is_err() {
-            break;
-        }
-    }
-    let us = t0.elapsed().as_micros() / 10;
-    // run_frame refills fuel each call, so what's missing now is one frame's cost.
-    let fuel = FUEL_PER_FRAME.saturating_sub(inst.store.get_fuel().unwrap_or(0));
-
-    info!(
-        "wasm spike: load {}us, caps {:#x}, frame = {} in {}us ({} fuel), led0 = ({}, {}, {}), psram free {}",
-        load_us,
-        inst.caps,
-        Debug2Format(&result),
-        us,
-        fuel,
-        out[0],
-        out[1],
-        out[2],
-        crate::heap_external_free()
-    );
 }

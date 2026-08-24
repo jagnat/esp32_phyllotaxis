@@ -1,7 +1,7 @@
 # Wasm sketch ABI
 
-A sketch is a wasm module in any language. `tools/wasm-sketch-template/` is the
-standalone Rust starter; `tools/testmod/` is the firmware's embedded test module.
+A sketch is a wasm module in any language. `tools/phyllotaxis-sketch-template/` is the
+standalone Rust starter; `tools/testmod/` is the firmware integration-test module.
 The host runs it under wasmi with fuel metering; a trap or sustained overruns
 disable the sketch without affecting the board.
 
@@ -74,29 +74,22 @@ and start-function traps are rejected.
 ## HTTP API
 
 ```sh
-export PHYLLO_TOKEN='<the token compiled into the firmware>'
-
 curl http://phyllotaxis.local/api/sketches
 
 curl -X POST \
-     -H "Authorization: Bearer $PHYLLO_TOKEN" \
      -H 'Content-Type: application/wasm' \
      -H 'X-Phyllo-Color: #be28ff' \
      --data-binary @sketch.wasm \
      http://phyllotaxis.local/api/sketches/<slot>/<name>
 
-curl -X POST -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://phyllotaxis.local/api/run/<slot>
+curl -X POST http://phyllotaxis.local/api/run/<slot>
 
-curl -X DELETE -H "Authorization: Bearer $PHYLLO_TOKEN" \
-     http://phyllotaxis.local/api/sketches/<slot>
+curl -X DELETE http://phyllotaxis.local/api/sketches/<slot>
 ```
 
-All responses are JSON with meaningful HTTP status codes. Listing is read-only
-and public. Upload, run, delete, and native sketch selection require
-`Authorization: Bearer <token>`. Write operations are disabled when the
-firmware is built without `PHYLLO_API_TOKEN`, or when the token is shorter than
-16 bytes. HTTP is not encrypted; use this only on a trusted WPA network.
+All responses are JSON with meaningful HTTP status codes. Listing, upload, run,
+delete, and selection of the permanent main vibe are intentionally available to everyone on
+the local network. Do not expose the board directly to the public Internet.
 
 Names are 1–32 ASCII letters, digits, `.`, `_`, or `-`. The optional
 `X-Phyllo-Color` header is a six-digit RGB hex menu color and defaults to
@@ -106,6 +99,11 @@ Sketches persist in 100 fixed 32 KiB slots in the `sketches` flash partition
 (see `partitions.csv`; flash once with the table using `cargo run --release`).
 The header is committed only after the payload is complete and CRC-protected;
 interrupted writes therefore fail closed.
+
+The physical menu always begins with the permanent main vibe, followed by one
+item for every occupied gallery slot in numeric slot order. Upload and delete
+operations update that menu without rebooting. Hovering loads the corresponding
+module and uses its optional `preview` export.
 
 Build the Rust example with `cargo build --release` from `tools/testmod/`.
 Debug WASM output is far too large for a slot.

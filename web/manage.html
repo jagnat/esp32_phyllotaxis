@@ -34,13 +34,12 @@
   <label>Menu color <input id="color" type="color" value="#be28ff"></label>
 </div>
 <div class="row" style="margin-top:12px">
-  <label>API token <input id="token" type="password" autocomplete="off" placeholder="Required to make changes"></label>
   <button id="upload">Build first, then upload</button>
   <button id="main">Return to main sketch</button>
 </div>
 <div id="status" role="status" aria-live="polite"></div>
 
-<h2>Stored sketches</h2>
+<h2>Uploaded sketches</h2>
 <table>
   <thead><tr><th>Slot</th><th>Name</th><th class="optional">Size</th><th class="optional">Color</th><th>Actions</th></tr></thead>
   <tbody id="sketches"><tr><td colspan="5">Loading…</td></tr></tbody>
@@ -49,16 +48,12 @@
 <script>
 const $ = id => document.getElementById(id);
 let chosenFile = null;
+let sketchesBySlot = new Map();
+let slotWasEdited = false;
 
 function message(text, kind = '') {
   $('status').textContent = text;
   $('status').className = kind;
-}
-
-function authHeaders(extra = {}) {
-  const token = $('token').value;
-  if (!token) throw new Error('Enter the API token first.');
-  return { Authorization: `Bearer ${token}`, ...extra };
 }
 
 async function api(path, options = {}) {
@@ -73,7 +68,13 @@ async function api(path, options = {}) {
 async function refresh() {
   try {
     const data = await api('/api/sketches');
-    $('connection').textContent = `${data.sketches.length} of ${data.slot_count} slots used · ABI ${data.abi_version}`;
+    sketchesBySlot = new Map(data.sketches.map(sketch => [sketch.slot, sketch]));
+    if (!slotWasEdited) {
+      const firstFree = Array.from({ length:data.slot_count }, (_, slot) => slot)
+        .find(slot => !sketchesBySlot.has(slot));
+      if (firstFree !== undefined) $('slot').value = firstFree;
+    }
+    $('connection').textContent = `${data.sketches.length} of ${data.slot_count} upload slots used · ABI ${data.abi_version}`;
     $('sketches').replaceChildren(...(data.sketches.length ? data.sketches.map(row) : [emptyRow()]));
   } catch (error) {
     $('connection').textContent = 'offline';
@@ -96,12 +97,12 @@ function row(sketch) {
   tr.children[1].appendChild(safeName);
   const run = document.createElement('button');
   run.textContent = 'Run';
-  run.onclick = () => mutate(`/api/run/${sketch.slot}`, { method:'POST', headers:authHeaders() }, `Running ${sketch.name}.`);
+  run.onclick = () => mutate(`/api/run/${sketch.slot}`, { method:'POST' }, `Running ${sketch.name}.`);
   const remove = document.createElement('button');
   remove.textContent = 'Delete'; remove.className = 'danger';
   remove.onclick = async () => {
     if (!confirm(`Delete slot ${sketch.slot} (${sketch.name})?`)) return;
-    await mutate(`/api/sketches/${sketch.slot}`, { method:'DELETE', headers:authHeaders() }, `Deleted ${sketch.name}.`);
+    await mutate(`/api/sketches/${sketch.slot}`, { method:'DELETE' }, `Deleted ${sketch.name}.`);
     refresh();
   };
   tr.querySelector('.actions').append(run, remove);
@@ -124,6 +125,7 @@ function selectFile(file) {
 }
 
 $('drop').onclick = () => $('file').click();
+$('slot').oninput = () => { slotWasEdited = true; };
 $('drop').onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') $('file').click(); };
 $('file').onchange = event => selectFile(event.target.files[0]);
 $('drop').ondragover = event => { event.preventDefault(); $('drop').classList.add('over'); };
@@ -138,18 +140,21 @@ $('upload').onclick = async () => {
     const name = $('name').value;
     if (!Number.isInteger(slot) || slot < 0 || slot > 99) throw new Error('Slot must be 0–99.');
     if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) throw new Error('Name may use letters, digits, dot, underscore, and dash.');
+    const existing = sketchesBySlot.get(slot);
+    if (existing && !confirm(`Slot ${slot} already contains ${existing.name}. Replace it?`)) return;
     message('Uploading and validating…');
     await api(`/api/sketches/${slot}/${encodeURIComponent(name)}`, {
       method:'POST',
-      headers:authHeaders({ 'Content-Type':'application/wasm', 'X-Phyllo-Color':$('color').value }),
+      headers:{ 'Content-Type':'application/wasm', 'X-Phyllo-Color':$('color').value },
       body:chosenFile
     });
     message(`Uploaded ${name} to slot ${slot}.`, 'ok');
-    refresh();
+    slotWasEdited = false;
+    await refresh();
   } catch (error) { message(error.message, 'error'); }
 };
 
-$('main').onclick = () => mutate('/api/select/0', { method:'POST', headers:authHeaders() }, 'Returned to the main sketch.');
+$('main').onclick = () => mutate('/api/select/0', { method:'POST' }, 'Returned to the main sketch.');
 refresh();
 </script>
 </html>

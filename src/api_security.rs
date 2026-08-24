@@ -20,23 +20,6 @@ pub fn parse_hex_color(value: &str) -> Option<[u8; 3]> {
     ])
 }
 
-pub fn bearer_matches(configured: &str, authorization: &str) -> bool {
-    if configured.len() < 16 {
-        return false;
-    }
-    let Some(candidate) = authorization.strip_prefix("Bearer ") else {
-        return false;
-    };
-    if candidate.len() != configured.len() {
-        return false;
-    }
-    candidate
-        .bytes()
-        .zip(configured.bytes())
-        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-        == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,19 +39,5 @@ mod tests {
         assert_eq!(parse_hex_color("000000"), Some([0, 0, 0]));
         assert_eq!(parse_hex_color("12345"), None);
         assert_eq!(parse_hex_color("nothex"), None);
-    }
-
-    #[test]
-    fn bearer_tokens_are_disabled_when_short_and_match_exactly() {
-        assert!(!bearer_matches("short", "Bearer short"));
-        assert!(bearer_matches(
-            "0123456789abcdef",
-            "Bearer 0123456789abcdef"
-        ));
-        assert!(!bearer_matches(
-            "0123456789abcdef",
-            "Bearer 0123456789abcdeg"
-        ));
-        assert!(!bearer_matches("0123456789abcdef", "0123456789abcdef"));
     }
 }

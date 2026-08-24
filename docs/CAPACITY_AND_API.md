@@ -47,11 +47,10 @@ The WASM ABI document and reference project are suitable for trusted sketch
 authors. Modules have no WASI access, receive only the documented `phyllo`
 imports, run with fuel metering, and are isolated from the native firmware.
 
-The management API now addresses the main local-network risks identified in
-the initial audit:
+The management API validates untrusted sketch input while intentionally
+allowing everyone on the local network to manage the gallery:
 
-- upload, delete, run, and native selection require a bearer token of at least
-  16 bytes; mutations are disabled when no token is compiled in;
+- upload, delete, run, and main-vibe selection are public on the local network;
 - request size and content type are checked before allocating the upload body;
 - upload performs full production-limit instantiation and validates imports,
   ABI, capabilities, exported types, pointers, memory, tables, and start code;
@@ -61,16 +60,14 @@ the initial audit:
 - slot metadata is committed last after the CRC-protected payload;
 - the partition and implementation provide 100 slots.
 
-Remaining boundaries: HTTP has no TLS, so bearer access is appropriate only on
-a trusted WPA network; WebSocket/DDP streaming is outside the authenticated
-WASM management API; and uploaded gallery entries are not yet individual
-choices in the physical menu. Upload and rewrite stress testing with Wi-Fi
+Every occupied gallery slot is now an individual physical-menu choice after the
+permanent main vibe. Remaining boundaries: the HTTP API must not be exposed
+directly to the public Internet. Upload and rewrite stress testing with Wi-Fi
 enabled is still required before unattended deployment.
 
 ## Decision
 
 There is ample flash for 100 sketches, and storing that many does not threaten
-runtime RAM. The ABI and token-protected API are suitable for trusted authors
-on the installation's WPA network. They are not a public-Internet service, and
-the token should not be distributed beyond people allowed to change the
-installation.
+runtime RAM. The ABI and input-validation limits are suitable for public
+participation on the installation's local network. The board must not be
+forwarded or otherwise exposed directly to the public Internet.

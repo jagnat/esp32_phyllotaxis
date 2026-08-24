@@ -11,6 +11,7 @@ pub struct SketchParams {
 	pub detents: i32,   // encoder movement this frame, signed
 	pub pressed: bool,  // debounced button level
 	pub released: bool, // button released this frame
+	pub preview: bool,  // render a lightweight gallery preview when available
 }
 
 impl SketchParams {
@@ -272,160 +273,27 @@ impl Sketch for OrganicVibe {
 	}
 }
 
-// strip split into bands, hue by band, value by energy
-pub struct AudioSketch;
-impl Sketch for AudioSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		let leds_per_band = NUM_LEDS / NUM_BANDS;
-		for (i, led) in leds.iter_mut().enumerate() {
-			let band = (i / leds_per_band).min(NUM_BANDS - 1);
-			let energy = p.audio.bands[band].min(1.0);
-			let hue = (band as f32 / NUM_BANDS as f32) * 360.0;
-			*led = hsv_to_rgb_rainbow(Hsv { h: hue, s: 1.0, v: energy });
-		}
-	}
-}
-
-pub struct FullWhiteSketch;
-impl Sketch for FullWhiteSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], _p: &SketchParams) {
-		for led in leds.iter_mut() {
-			{ *led = Rgb{r: 255, g: 255, b: 255} };
-		}
-	}
-}
-
-pub struct HsvRadialSketch;
-impl Sketch for HsvRadialSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		for (i, led) in leds.iter_mut().enumerate() {
-			let x = LED_POSITIONS[i][0];
-			let y = LED_POSITIONS[i][1];
-
-			let theta = atan2f(y, x);
-
-			let time_hue = crate::timebase::phase_degrees(p.elapsed_us, 11_250_000);
-			let hue = fmodf((theta / 3.14159) * 180.0 + 180.0 + time_hue, 360.0);
-			let color = Hsv::new(hue, 1.0, 1.0);
-			*led = hsv_to_rgb_rainbow(color);
-		}
-	}
-}
-
-// Hardware bring-up sketch for the EC11: spin sweeps a ring radially, holding
-// the button floods green, and three fixed LEDs mirror the raw pin levels
-// (red = A, green = B, blue = button) so a dead signal is visible even when
-// the quadrature decode produces nothing.
-pub struct EncoderTestSketch {
-	pos: i32,
-}
-
-impl EncoderTestSketch {
-	// Detents for one full center-to-rim sweep.
-	const SWEEP: i32 = 24;
-}
-
-impl Default for EncoderTestSketch {
-	fn default() -> Self { Self { pos: 0 } }
-}
-
-impl Sketch for EncoderTestSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		self.pos += p.detents;
-
-		if p.pressed {
-			for led in leds.iter_mut() { *led = Rgb::new(0, 255, 0); }
-			return;
-		}
-
-		let target = self.pos.rem_euclid(Self::SWEEP) as f32 / Self::SWEEP as f32;
-		for (i, led) in leds.iter_mut().enumerate() {
-			let x = LED_POSITIONS[i][0];
-			let y = LED_POSITIONS[i][1];
-			let r = sqrtf(x * x + y * y);
-
-			// bright cyan ring at the target radius, dim warm fill inside it
-			let d = target - r;
-			let ring = fmaxf(0.0, 1.0 - (if d < 0.0 { -d } else { d }) / 0.12);
-			let fill = if d > 0.0 { 0.15 } else { 0.0 };
-			*led = Rgb::new(0, 0, 0)
-				.lerp(Rgb::new(60, 20, 0), fill / 0.15)
-				.add(Rgb::new(0, 0, 0).lerp(Rgb::new(0, 200, 255), ring * ring));
-		}
-
-		let raw = crate::input::RAW_PINS.load(core::sync::atomic::Ordering::Relaxed);
-		leds[0] = if raw & 0b100 != 0 { Rgb::new(255, 0, 0) } else { Rgb::new(8, 0, 0) };
-		leds[1] = if raw & 0b010 != 0 { Rgb::new(0, 255, 0) } else { Rgb::new(0, 8, 0) };
-		leds[2] = if raw & 0b001 != 0 { Rgb::new(0, 0, 255) } else { Rgb::new(0, 0, 8) };
-	}
-}
-
-// Displays frames pushed over DDP; while no stream is live, a slow dim cyan
-// breath marks the slot as waiting.
-pub struct StreamSketch;
-impl Sketch for StreamSketch {
-	fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
-		if crate::stream::stream_fresh() {
-			crate::stream::FRAME.lock(|f| {
-				let f = f.borrow();
-				for (i, led) in leds.iter_mut().enumerate() {
-					*led = Rgb::new(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
-				}
-			});
-		} else {
-			let breath = (sinf(p.phase_radians(4_188_790)) + 1.0) * 0.5;
-			let v = (10.0 + 25.0 * breath) as u8;
-			for led in leds.iter_mut() {
-				*led = Rgb::new(0, v, v);
-			}
-		}
-	}
-}
-
 pub struct SketchBank {
 	organic: OrganicVibe,
-	audio_sketch: AudioSketch,
-	full_white: FullWhiteSketch,
-	radial_hsv: HsvRadialSketch,
-	encoder_test: EncoderTestSketch,
-	stream: StreamSketch,
 	wasm: crate::wasm::WasmSketch,
 	active: usize,
 }
 impl SketchBank {
-	pub const DEFAULT_SLOT: usize = 0;
-	pub const COUNT: usize = 7;
-	pub const WASM_SLOT: usize = 6;
-	/// Visitor-facing choices. Power and hardware diagnostics remain remotely
-	/// addressable without appearing in the physical menu.
-	pub const PUBLIC_SLOTS: &'static [usize] = &[0, 1, 3, Self::WASM_SLOT];
-	pub const PUBLIC_COLORS: &'static [Rgb] = &[
-		Rgb::new(255, 110, 10),
-		Rgb::new(70, 255, 80),
-		Rgb::new(0, 210, 255),
-		Rgb::new(190, 40, 255),
-	];
+	pub const MAIN_SLOT: usize = 0;
+	pub const WASM_SLOT: usize = 1;
+	pub const COUNT: usize = 2;
+	pub const MAIN_COLOR: Rgb = Rgb::new(255, 110, 10);
 
 	pub fn new() -> Self {
 		Self {
 			organic: OrganicVibe::default(),
-			audio_sketch: AudioSketch,
-			full_white: FullWhiteSketch,
-			radial_hsv: HsvRadialSketch,
-			encoder_test: EncoderTestSketch::default(),
-			stream: StreamSketch,
 			wasm: crate::wasm::WasmSketch::default(),
-			active: Self::DEFAULT_SLOT }
+			active: Self::MAIN_SLOT }
 	}
 
 	pub fn render(&mut self, leds: &mut [Rgb; NUM_LEDS], p: &SketchParams) {
 		match self.active {
-			1 => self.audio_sketch.render(leds, p),
-			2 => self.full_white.render(leds, p),
-			3 => self.radial_hsv.render(leds, p),
-			4 => self.encoder_test.render(leds, p),
-			5 => self.stream.render(leds, p),
-			6 => self.wasm.render(leds, p),
+			Self::WASM_SLOT => self.wasm.render(leds, p),
 			_ => self.organic.render(leds, p),
 		}
 	}
@@ -434,16 +302,9 @@ impl SketchBank {
 		self.active
 	}
 
-	/// True while the active sketch owns the encoder and button. The hardware
-	/// diagnostics, stream transport, and opted-in wasm guests use a long hold
-	/// as their universal escape gesture.
+	/// True while an opted-in WASM guest owns the encoder and button.
 	pub fn input_claimed(&self) -> bool {
-		matches!(self.active, 4 | 5)
-			|| (self.active == Self::WASM_SLOT && self.wasm.wants_input())
-	}
-
-	pub fn step(&mut self, delta: i32) {
-		self.active = (self.active as i32 + delta).rem_euclid(Self::COUNT as i32) as usize;
+		self.active == Self::WASM_SLOT && self.wasm.wants_input()
 	}
 
 	pub fn set(&mut self, idx: usize) {

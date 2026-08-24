@@ -1,3 +1,7 @@
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 pub const EXIT_HOLD_US: u64 = 5_000_000;
 pub const MENU_TIMEOUT_US: u64 = 15_000_000;
 
@@ -28,7 +32,7 @@ pub struct UiOutput {
 }
 
 pub struct UiState {
-    menu_slots: &'static [usize],
+    menu_slots: Vec<usize>,
     slot_count: usize,
     mode: UiMode,
     running_slot: usize,
@@ -40,12 +44,12 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(menu_slots: &'static [usize], slot_count: usize, default_slot: usize) -> Self {
+    pub fn new(menu_slots: &[usize], slot_count: usize, default_slot: usize) -> Self {
         assert!(!menu_slots.is_empty());
         assert!(default_slot < slot_count);
         assert!(menu_slots.iter().all(|slot| *slot < slot_count));
         Self {
-            menu_slots,
+            menu_slots: menu_slots.to_vec(),
             slot_count,
             mode: UiMode::Running,
             running_slot: default_slot,
@@ -57,6 +61,37 @@ impl UiState {
             last_menu_input_us: 0,
             press_started_us: None,
             suppress_release: false,
+        }
+    }
+
+    pub fn set_menu_slots(&mut self, menu_slots: &[usize]) {
+        assert!(!menu_slots.is_empty());
+        assert!(menu_slots.iter().all(|slot| *slot < self.slot_count));
+        let visible_slot = self.render_slot();
+        self.menu_slots.clear();
+        self.menu_slots.extend_from_slice(menu_slots);
+        if !self.menu_slots.contains(&self.running_slot) {
+            self.running_slot = self.menu_slots[0];
+            self.mode = UiMode::Running;
+        }
+        let anchor = self
+            .menu_slots
+            .iter()
+            .position(|slot| *slot == visible_slot)
+            .or_else(|| {
+                self.menu_slots
+                    .iter()
+                    .position(|slot| *slot == self.running_slot)
+            })
+            .unwrap_or(0);
+        self.align_position_to(anchor);
+    }
+
+    pub fn force_select(&mut self, slot: usize) {
+        if self.menu_slots.contains(&slot) {
+            self.running_slot = slot;
+            self.mode = UiMode::Running;
+            self.suppress_release = false;
         }
     }
 
@@ -113,7 +148,7 @@ impl UiState {
 
         let mut sketch_input = UiInput::default();
 
-        if let Some(slot) = remote_select.filter(|slot| *slot < self.slot_count) {
+        if let Some(slot) = remote_select.filter(|slot| self.menu_slots.contains(slot)) {
             self.running_slot = slot;
             self.mode = UiMode::Running;
             self.suppress_release = input.pressed || input.released;
@@ -132,7 +167,9 @@ impl UiState {
                     }
                 }
                 UiMode::Running => {
-                    if input.detents != 0 {
+                    if self.menu_slots.len() == 1 {
+                        // The permanent main vibe does not need a one-item menu.
+                    } else if input.detents != 0 {
                         self.enter_menu(now_us, input.detents);
                     } else if input.released {
                         self.enter_menu(now_us, 0);
@@ -249,11 +286,49 @@ mod tests {
     #[test]
     fn remote_selection_runs_immediately_and_rejects_invalid_slots() {
         let mut ui = state();
-        let selected = ui.update(100, UiInput::default(), false, Some(5));
+        let selected = ui.update(100, UiInput::default(), false, Some(6));
         assert_eq!(selected.mode, UiMode::Running);
-        assert_eq!(selected.running_slot, 5);
-        let ignored = ui.update(200, UiInput::default(), false, Some(99));
-        assert_eq!(ignored.running_slot, 5);
+        assert_eq!(selected.running_slot, 6);
+        let ignored = ui.update(200, UiInput::default(), false, Some(5));
+        assert_eq!(ignored.running_slot, 6);
+    }
+
+    #[test]
+    fn deleting_the_running_gallery_item_falls_back_to_main() {
+        let mut ui = UiState::new(&[0, 4, 8], 101, 0);
+        ui.update(100, UiInput::default(), false, Some(8));
+        ui.set_menu_slots(&[0, 4]);
+        let out = ui.update(200, UiInput::default(), false, None);
+        assert_eq!(out.mode, UiMode::Running);
+        assert_eq!(out.running_slot, 0);
+        assert_eq!(out.render_slot, 0);
+    }
+
+    #[test]
+    fn adding_a_gallery_item_preserves_the_running_item() {
+        let mut ui = UiState::new(&[0, 4], 101, 0);
+        ui.update(100, UiInput::default(), false, Some(4));
+        ui.set_menu_slots(&[0, 2, 4]);
+        let out = ui.update(200, UiInput::default(), false, None);
+        assert_eq!(out.running_slot, 4);
+        assert_eq!(out.render_slot, 4);
+    }
+
+    #[test]
+    fn main_vibe_alone_does_not_open_a_one_item_menu() {
+        let mut ui = UiState::new(&[0], 101, 0);
+        let out = ui.update(
+            100,
+            UiInput {
+                detents: 1,
+                released: true,
+                ..UiInput::default()
+            },
+            false,
+            None,
+        );
+        assert_eq!(out.mode, UiMode::Running);
+        assert_eq!(out.render_slot, 0);
     }
 
     #[test]

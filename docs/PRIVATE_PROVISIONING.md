@@ -40,11 +40,9 @@ hostname or numeric address can be used:
 tools/private_api_smoke.zsh phyllotaxis.local
 ```
 
-It uses slot 99 only after confirming that the slot is empty. It tests public
-reads, rejected unauthenticated writes, upload bounds and validation, a valid
-upload/run, return to the main sketch, and deletion. The token is sourced
-internally and never printed. Set `PHYLLO_SMOKE_SLOT` to reserve a different
-empty test slot.
+It uses slot 99 only after confirming that the slot is empty. It tests reads,
+upload bounds and validation, a valid upload/run, return to the main sketch,
+and deletion. Set `PHYLLO_SMOKE_SLOT` to reserve a different empty test slot.
 
 Shell exports created in one terminal cannot change an already-running Codex
 process. The private file is the handoff mechanism for later automated tests:
@@ -52,6 +50,7 @@ approved helper commands can source it internally without displaying it. Do
 not ask debugging commands to print the environment, enable shell tracing, or
 run `strings` against the private firmware artifact.
 
-The credentials and API token are compiled into the flashed firmware. Anyone
-with physical flash-read access can recover them, and HTTP does not encrypt the
-bearer token. Use only the installation's trusted WPA network.
+The Wi-Fi credentials are compiled into the flashed firmware and anyone with
+physical flash-read access can recover them. Sketch-management endpoints are
+intentionally public to the local network; do not expose the board directly to
+the public Internet.

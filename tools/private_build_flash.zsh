@@ -22,12 +22,6 @@ fi
 source "$config_file"
 : "${PHYLLO_SSID:?PHYLLO_SSID is missing}"
 : "${PHYLLO_PASS:=}"
-: "${PHYLLO_API_TOKEN:?PHYLLO_API_TOKEN is missing}"
-
-if (( ${#PHYLLO_API_TOKEN} < 16 )); then
-    print -u2 "PHYLLO_API_TOKEN must contain at least 16 characters"
-    exit 1
-fi
 
 private_target="$(mktemp -d "${TMPDIR:-/tmp}/phyllo-private-build.XXXXXX")"
 trap '[[ -n "${private_target:-}" && -d "$private_target" ]] && rm -rf -- "$private_target"' EXIT
@@ -47,5 +41,5 @@ else
         "$private_target/xtensa-esp32s3-none-elf/release/esp32_phyllotaxis"
 fi
 
-unset PHYLLO_SSID PHYLLO_PASS PHYLLO_API_TOKEN
+unset PHYLLO_SSID PHYLLO_PASS
 print "Private build flashed; temporary build artifacts removed."

@@ -10,9 +10,9 @@ fi
 
 usage() {
     printf '%s\n' \
-        'usage: ./phyllo list|health|build|upload|run|delete|native' \
+        'usage: ./phyllo list|health|build|upload|run|delete|main' \
         '' \
-        'Configure PHYLLO_HOST, PHYLLO_API_TOKEN, PHYLLO_SLOT,' \
+        'Configure PHYLLO_HOST, PHYLLO_SLOT,' \
         'PHYLLO_NAME, and PHYLLO_COLOR in .phyllo.env or your shell.' >&2
     exit 2
 }
@@ -38,13 +38,6 @@ case ${PHYLLO_HOST:-} in
     *) base_url=http://${PHYLLO_HOST%/} ;;
 esac
 
-auth() {
-    if [ -z "${PHYLLO_API_TOKEN:-}" ] || [ "$PHYLLO_API_TOKEN" = replace-with-the-board-token ]; then
-        printf '%s\n' 'PHYLLO_API_TOKEN is not configured' >&2
-        exit 2
-    fi
-}
-
 slot() {
     case ${PHYLLO_SLOT:-} in
         ''|*[!0-9]*) printf '%s\n' 'PHYLLO_SLOT must be 0..99' >&2; exit 2 ;;
@@ -63,7 +56,6 @@ case "$command_name" in
         curl_api "$base_url/api/health"
         ;;
     upload)
-        auth
         slot
         name=${PHYLLO_NAME:-}
         color=${PHYLLO_COLOR:-#be28ff}
@@ -79,29 +71,21 @@ case "$command_name" in
             exit 1
         fi
         curl_api -X POST \
-            -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
             -H 'Content-Type: application/wasm' \
             -H "X-Phyllo-Color: $color" \
             --data-binary "@$module" \
             "$base_url/api/sketches/$PHYLLO_SLOT/$name"
         ;;
     run)
-        auth
         slot
-        curl_api -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
-            "$base_url/api/run/$PHYLLO_SLOT"
+        curl_api -X POST "$base_url/api/run/$PHYLLO_SLOT"
         ;;
     delete)
-        auth
         slot
-        curl_api -X DELETE -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
-            "$base_url/api/sketches/$PHYLLO_SLOT"
+        curl_api -X DELETE "$base_url/api/sketches/$PHYLLO_SLOT"
         ;;
-    native)
-        auth
-        native_slot=${2:-0}
-        curl_api -X POST -H "Authorization: Bearer $PHYLLO_API_TOKEN" \
-            "$base_url/api/select/$native_slot"
+    main)
+        curl_api -X POST "$base_url/api/select/0"
         ;;
     *) usage ;;
 esac

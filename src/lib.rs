@@ -9,7 +9,6 @@ pub mod audio;
 pub mod sketches;
 pub mod input;
 pub mod net;
-pub mod stream;
 pub mod wasm;
 pub mod gallery;
 pub mod health;

@@ -11,16 +11,16 @@ chmod 600 .phyllo.env
 ```
 
 Rustup reads `rust-toolchain.toml` and installs stable Rust plus the WASM target.
-Put the board hostname or IP and its API token in `.phyllo.env`. That file is
-ignored by Git. You can instead point `PHYLLO_ENV_FILE` at an existing private
-environment file. Pick an empty slot from `./phyllo list`, then:
+Put the board hostname or IP in `.phyllo.env`. That file is ignored by Git. You
+can instead point `PHYLLO_ENV_FILE` at another environment file. Pick an empty
+slot from `./phyllo list`, then:
 
 ```sh
 ./phyllo upload
 ./phyllo run
 ```
 
-Other commands are `build`, `health`, `list`, `delete`, and `native`. Uploading
+Other commands are `build`, `health`, `list`, `delete`, and `main`. Uploading
 again to the same slot atomically replaces that sketch; deleting erases it.
 
 ## Sketch API
@@ -44,6 +44,6 @@ modules at or below 32,704 bytes and rendering within the 120K fuel budget.
 ## Storage identity
 
 The persistent ID is the numeric slot, 0 through 99. A slot also has a display
-name and menu color. Names are metadata rather than unique IDs. `./phyllo list`
-returns every occupied slot; `upload` replaces the configured slot, and
-`delete` removes it.
+name and menu color. Names are metadata rather than unique IDs. Every occupied
+slot appears as its own physical-menu item. `./phyllo list` returns every
+occupied slot; `upload` replaces the configured slot, and `delete` removes it.
