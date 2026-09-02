@@ -8,6 +8,18 @@ version      = "0.1.0"
 name = "esp32_phyllotaxis"
 path = "./src/bin/main.rs"
 
+[[bin]]
+name = "strip_test"
+path = "./src/bin/strip_test.rs"
+
+[[bin]]
+name = "strip_hsv"
+path = "./src/bin/strip_hsv.rs"
+
+[[bin]]
+name = "strip_fire"
+path = "./src/bin/strip_fire.rs"
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["defmt", "esp32s3", "unstable"] }
 
