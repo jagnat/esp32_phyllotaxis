@@ -1,4 +1,9 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
+
+#[cfg(not(target_arch = "wasm32"))]
+compile_error!(
+    "Phyllotaxis sketches must target wasm32-unknown-unknown; use ./phyllo build or cargo build --release --target wasm32-unknown-unknown"
+);
 
 mod phyllo;
 mod sketch;
@@ -8,6 +13,7 @@ use phyllo::{Frame, Input, FRAME_BYTES, INPUT_BYTES};
 static mut INPUT: [u8; INPUT_BYTES] = [0; INPUT_BYTES];
 static mut FRAME: [u8; FRAME_BYTES] = [0; FRAME_BYTES];
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()

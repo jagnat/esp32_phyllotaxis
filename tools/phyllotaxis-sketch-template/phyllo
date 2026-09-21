@@ -28,7 +28,7 @@ curl_api() {
 
 if [ "$command_name" = build ]; then
     cd "$repo_dir"
-    cargo build --release
+    cargo build --release --target wasm32-unknown-unknown
     exit
 fi
 
@@ -63,7 +63,7 @@ case "$command_name" in
             ''|*[!A-Za-z0-9._-]*) printf '%s\n' 'PHYLLO_NAME contains invalid characters' >&2; exit 2 ;;
         esac
         cd "$repo_dir"
-        cargo build --release
+        cargo build --release --target wasm32-unknown-unknown
         module=target/wasm32-unknown-unknown/release/phyllotaxis_sketch.wasm
         bytes=$(wc -c < "$module" | tr -d ' ')
         if [ "$bytes" -gt 32704 ]; then

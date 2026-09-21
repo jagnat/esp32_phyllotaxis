@@ -3,6 +3,16 @@
 Edit `src/sketch.rs`; the raw host bindings and ABI glue are already wrapped in
 safe types. The board renders 90 RGB LEDs at a 60fps target.
 
+## Copy
+
+Copy the complete template, including `.cargo/config.toml`:
+
+```sh
+mkdir my-sketch
+cp -R /path/to/phyllotaxis-sketch-template/. my-sketch/
+cd my-sketch
+```
+
 ## Start
 
 ```sh
@@ -20,8 +30,9 @@ slot from `./phyllo list`, then:
 ./phyllo run
 ```
 
-Other commands are `build`, `health`, `list`, `delete`, and `main`. Uploading
-again to the same slot atomically replaces that sketch; deleting erases it.
+Other commands are `build`, `health`, `list`, `delete`, and `main`. `build` and
+`upload` always compile for `wasm32-unknown-unknown`. Uploading again to the same
+slot atomically replaces that sketch; deleting erases it.
 
 ## Sketch API
 
