@@ -5,7 +5,7 @@ use crate::phyllo::{self, Frame, Input, LED_COUNT};
 /// Use NONE, AUDIO, INPUT, or AUDIO | INPUT.
 pub const CAPABILITIES: u32 = phyllo::capabilities::NONE;
 
-/// Called at about 60fps. Write all 90 pixels each frame.
+/// Called at about 60fps. Write all 89 pixels each frame.
 pub fn render(input: &Input<'_>, frame: &mut Frame<'_>) {
     // `phase` safely loops integer time before converting it to f32.
     let time = input.phase(8_000_000);

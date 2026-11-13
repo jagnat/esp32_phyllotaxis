@@ -1,12 +1,14 @@
-/// The 20 greatest-radius LEDs, sorted around the circumference and split at
-/// the five larger angular gaps. Each group is four physically adjacent outer
-/// pixels; group order follows the perimeter.
+/// The 20 greatest-radius LEDs of the 89-LED golden-angle board, sorted by
+/// angle and cut into five runs of four. This board has no 5-fold symmetry, so
+/// the runs are simply consecutive outer pixels (each spans about 55 degrees);
+/// the split starts after the one wide gap in the outer ring. Group order
+/// follows the perimeter counterclockwise (increasing atan2 angle).
 pub const GROUPS: [[usize; 4]; 5] = [
-    [73, 72, 64, 63],
-    [55, 54, 46, 45],
-    [37, 36, 28, 27],
-    [19, 18, 10, 9],
-    [1, 0, 82, 81],
+    [76, 83, 84, 0],
+    [7, 8, 15, 16],
+    [24, 25, 33, 34],
+    [41, 42, 49, 50],
+    [58, 59, 67, 68],
 ];
 
 pub fn is_reserved(index: usize) -> bool {
@@ -31,7 +33,7 @@ mod tests {
 
     #[test]
     fn outer_menu_uses_twenty_distinct_leds() {
-        let mut seen = [false; 90];
+        let mut seen = [false; crate::util::NUM_LEDS];
         let mut count = 0;
         for index in GROUPS.iter().flatten().copied() {
             assert!(index < seen.len());
@@ -44,11 +46,11 @@ mod tests {
 
     #[test]
     fn groups_are_four_adjacent_outer_pixels() {
-        assert_eq!(GROUPS[0], [73, 72, 64, 63]);
-        assert_eq!(GROUPS[1], [55, 54, 46, 45]);
-        assert_eq!(GROUPS[2], [37, 36, 28, 27]);
-        assert_eq!(GROUPS[3], [19, 18, 10, 9]);
-        assert_eq!(GROUPS[4], [1, 0, 82, 81]);
+        assert_eq!(GROUPS[0], [76, 83, 84, 0]);
+        assert_eq!(GROUPS[1], [7, 8, 15, 16]);
+        assert_eq!(GROUPS[2], [24, 25, 33, 34]);
+        assert_eq!(GROUPS[3], [41, 42, 49, 50]);
+        assert_eq!(GROUPS[4], [58, 59, 67, 68]);
     }
 
     #[test]

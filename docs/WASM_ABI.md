@@ -47,7 +47,7 @@ The input block is 132 bytes. Guests should reduce integer elapsed time into a
 bounded animation phase before converting it to `f32`; converting the full
 uptime to `f32` reintroduces long-running precision loss.
 
-Frame buffer: 90 LEDs x 3 bytes RGB. The host gamma-corrects after readback.
+Frame buffer: 89 LEDs x 3 bytes RGB. The host gamma-corrects after readback.
 
 ## Host imports (module `"phyllo"`)
 

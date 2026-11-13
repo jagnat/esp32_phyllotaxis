@@ -2,7 +2,7 @@
 #![allow(dead_code)] // This is a public toolbox; a sketch rarely uses every item.
 
 pub const ABI_VERSION: u32 = 1;
-pub const LED_COUNT: usize = 90;
+pub const LED_COUNT: usize = 89;
 pub(crate) const INPUT_BYTES: usize = 132;
 pub(crate) const FRAME_BYTES: usize = LED_COUNT * 3;
 

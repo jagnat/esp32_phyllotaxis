@@ -5,7 +5,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-const NUM_LEDS: usize = 90;
+const NUM_LEDS: usize = 89;
 const INPUT_LEN: usize = 132;
 
 const CAP_AUDIO_FEATURES: u32 = 1;

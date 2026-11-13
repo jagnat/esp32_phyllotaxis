@@ -1,7 +1,7 @@
 # Phyllotaxis WASM sketch starter
 
 Edit `src/sketch.rs`; the raw host bindings and ABI glue are already wrapped in
-safe types. The board renders 90 RGB LEDs at a 60fps target.
+safe types. The board renders 89 RGB LEDs at a 60fps target.
 
 ## Start
 

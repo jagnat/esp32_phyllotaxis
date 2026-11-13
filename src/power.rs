@@ -4,7 +4,7 @@ use crate::power_math::{SCALE_ONE, estimated_ma, scale_channel, target_scale_q16
 use crate::util::{NUM_LEDS, Rgb};
 
 /// Production ceiling. This is deliberately far below the conservative
-/// 5.49A estimate for 90 pixels at full white while leaving normal sketches
+/// 5.34A estimate for 89 pixels at full white while leaving normal sketches
 /// enough headroom to retain their intended contrast.
 pub static LED_BUDGET_MA: AtomicU32 = AtomicU32::new(1_500);
 pub static LED_REQUESTED_MA: AtomicU32 = AtomicU32::new(0);
