@@ -35,6 +35,7 @@ pub struct UiOutput {
 
 pub struct UiState {
     menu_slots: Vec<usize>,
+    persistent_slots: Vec<usize>,
     attract_slots: Vec<usize>,
     slot_count: usize,
     default_slot: usize,
@@ -57,6 +58,7 @@ impl UiState {
         assert!(menu_slots.contains(&default_slot));
         Self {
             menu_slots: menu_slots.to_vec(),
+            persistent_slots: alloc::vec![default_slot],
             attract_slots: alloc::vec![default_slot],
             slot_count,
             default_slot,
@@ -83,6 +85,11 @@ impl UiState {
         self.menu_slots.clear();
         self.menu_slots.extend_from_slice(menu_slots);
         let installed_slots = &self.menu_slots;
+        self.persistent_slots
+            .retain(|slot| installed_slots.contains(slot));
+        if !self.persistent_slots.contains(&self.default_slot) {
+            self.persistent_slots.insert(0, self.default_slot);
+        }
         self.attract_slots
             .retain(|slot| installed_slots.contains(slot));
         if !self.attract_slots.contains(&self.default_slot) {
@@ -116,6 +123,19 @@ impl UiState {
         );
         self.attract_slots.clear();
         self.attract_slots.extend_from_slice(attract_slots);
+    }
+
+    /// Set menu entries that should not automatically return to the default
+    /// after inactivity. Unlike attract entries, these are never auto-cycled.
+    pub fn set_persistent_slots(&mut self, persistent_slots: &[usize]) {
+        assert!(persistent_slots.contains(&self.default_slot));
+        assert!(
+            persistent_slots
+                .iter()
+                .all(|slot| self.menu_slots.contains(slot))
+        );
+        self.persistent_slots.clear();
+        self.persistent_slots.extend_from_slice(persistent_slots);
     }
 
     pub fn force_select(&mut self, slot: usize) {
@@ -241,6 +261,7 @@ impl UiState {
 
         if self.mode == UiMode::Running
             && self.running_slot != self.default_slot
+            && !self.persistent_slots.contains(&self.running_slot)
             && !self.attract_slots.contains(&self.running_slot)
             && now_us.saturating_sub(self.last_activity_us) >= AUTO_RETURN_US
         {
@@ -497,6 +518,16 @@ mod tests {
         assert_eq!(out.mode, UiMode::Running);
         assert_eq!(out.running_slot, 0);
         assert_eq!(out.render_slot, 0);
+    }
+
+    #[test]
+    fn persistent_system_mode_does_not_auto_return_or_attract_cycle() {
+        let mut ui = state();
+        ui.set_persistent_slots(&[0, 3]);
+        ui.update(10, UiInput::default(), false, Some(3));
+        let out = ui.update(AUTO_RETURN_US * 2, UiInput::default(), false, None);
+        assert_eq!(out.running_slot, 3);
+        assert_eq!(out.render_slot, 3);
     }
 
     #[test]

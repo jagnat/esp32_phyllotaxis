@@ -15,8 +15,11 @@ use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
 use esp_hal::dma_buffers;
-use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::gpio::rtc_io::LowPowerOutput;
+use esp_hal::gpio::{Input, InputConfig, Pull, RtcFunction, RtcPin, RtcPinWithResistors};
 use esp_hal::i2s::master::{Config, I2s, I2sRx};
+use esp_hal::rtc_cntl::Rtc;
+use esp_hal::rtc_cntl::sleep::{Ext0WakeupSource, WakeupLevel};
 use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
 use esp_hal::time::{Duration as HalDuration, Rate};
 use esp_hal::timer::timg::{MwdtStage, TimerGroup, Wdt};
@@ -29,7 +32,10 @@ use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
 
 use esp32_phyllotaxis::audio::*;
-use esp32_phyllotaxis::input::{BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA, encoder_task};
+use esp32_phyllotaxis::input::{
+    BUTTON_PRESSED, BUTTON_RELEASED, ENCODER_DELTA, RELEASE_FOR_SLEEP, RELEASED_FOR_SLEEP,
+    encoder_task,
+};
 use esp32_phyllotaxis::net::{self, SKETCH_SELECT};
 use esp32_phyllotaxis::sketches::*;
 use esp32_phyllotaxis::ui_state::{UiInput, UiMode, UiState};
@@ -99,6 +105,25 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+
+    // Deep sleep is a reset, but the RTC IO mux survives it. Sleep leaves the
+    // LED data pin routed to RTC GPIO (and actively low) and the encoder button
+    // routed there for EXT0 wake. Give both pads back to the digital IO mux
+    // before SPI and the encoder input claim them below.
+    esp_hal::peripherals::RTC_IO::regs()
+        .enable_w1tc()
+        .write(|w| unsafe { w.enable_w1tc().bits(1 << 4) });
+    peripherals.GPIO4.rtcio_pad_hold(false);
+    peripherals
+        .GPIO4
+        .rtc_set_config(false, false, RtcFunction::Rtc);
+    peripherals.GPIO17.rtcio_pad_hold(false);
+    peripherals
+        .GPIO17
+        .rtc_set_config(false, false, RtcFunction::Rtc);
+    peripherals.GPIO17.rtcio_pullup(false);
+    peripherals.GPIO17.rtcio_pulldown(false);
+
     esp32_phyllotaxis::health::init(esp_hal::system::reset_reason());
 
     // PSRAM region is registered first so unconstrained allocations (wasmi's
@@ -162,7 +187,7 @@ async fn main(spawner: Spawner) -> ! {
     .into_async();
 
     esp32_phyllotaxis::gallery::init(peripherals.FLASH);
-    spawner.spawn(unwrap!(render(spi, watchdog)));
+    spawner.spawn(unwrap!(render(spi, watchdog, peripherals.LPWR)));
     spawner.spawn(unwrap!(i2s_receive(i2s_rx, rx_buffer)));
 
     let rng = esp_hal::rng::Rng::new();
@@ -186,10 +211,17 @@ async fn main(spawner: Spawner) -> ! {
 
 const SCENE_TRANSITION_US: u64 = 220_000;
 const MAIN_TARGET: usize = 0;
+const NIGHT_TARGET: usize = esp32_phyllotaxis::gallery::SLOTS + 1;
+const SLEEP_TARGET: usize = esp32_phyllotaxis::gallery::SLOTS + 2;
+const SYSTEM_TARGETS: &[usize] = &[MAIN_TARGET, NIGHT_TARGET];
 
 async fn gallery_menu() -> (Vec<usize>, Vec<Rgb>, Vec<usize>) {
-    let mut targets = vec![MAIN_TARGET];
-    let mut colors = vec![SketchBank::MAIN_COLOR];
+    let mut targets = vec![MAIN_TARGET, NIGHT_TARGET, SLEEP_TARGET];
+    let mut colors = vec![
+        SketchBank::MAIN_COLOR,
+        Rgb::new(255, 44, 0),
+        Rgb::new(12, 28, 80),
+    ];
     let mut attract = vec![MAIN_TARGET];
     if let Some(entries) = esp32_phyllotaxis::gallery::menu_entries().await {
         targets.reserve(entries.len());
@@ -211,6 +243,7 @@ async fn gallery_menu() -> (Vec<usize>, Vec<Rgb>, Vec<usize>) {
 async fn render(
     mut spi: SpiDmaBus<'static, Async>,
     mut watchdog: Wdt<esp_hal::peripherals::TIMG0<'static>>,
+    lpwr: esp_hal::peripherals::LPWR<'static>,
 ) {
     let started = Instant::now();
     let mut last = started;
@@ -225,9 +258,10 @@ async fn render(
     let mut gallery_revision = esp32_phyllotaxis::gallery::revision();
     let mut ui = UiState::new(
         &menu_targets,
-        esp32_phyllotaxis::gallery::SLOTS + 1,
+        esp32_phyllotaxis::gallery::SLOTS + 3,
         MAIN_TARGET,
     );
+    ui.set_persistent_slots(SYSTEM_TARGETS);
     ui.set_attract_slots(&attract_targets);
     let mut loaded_gallery_slot = None;
     let mut last_scene = [Rgb::new(0, 0, 0); NUM_LEDS];
@@ -292,7 +326,10 @@ async fn render(
         }
         let mut render_target = ui_frame.render_slot;
         let mut running_target = ui_frame.running_slot;
-        if render_target == MAIN_TARGET {
+        if ui_frame.mode == UiMode::Running && running_target == SLEEP_TARGET {
+            enter_deep_sleep(spi, watchdog, lpwr, &mut led_buf, &mut tx_buf).await;
+        }
+        if matches!(render_target, MAIN_TARGET | NIGHT_TARGET | SLEEP_TARGET) {
             bank.set(SketchBank::MAIN_SLOT);
         } else {
             let gallery_slot = render_target - 1;
@@ -349,6 +386,10 @@ async fn render(
             preview: ui_frame.mode == UiMode::Menu,
         };
         bank.render(&mut led_buf, &params);
+        if render_target == SLEEP_TARGET {
+            // Preview sleep as a black background with only the menu markers.
+            led_buf.fill(Rgb::new(0, 0, 0));
+        }
         if let Some(position) = ui_frame.menu_position {
             esp32_phyllotaxis::menu::render(&mut led_buf, position, &menu_colors, elapsed_us);
         }
@@ -365,6 +406,9 @@ async fn render(
         }
         last_scene = led_buf;
         apply_gamma(&mut led_buf);
+        if render_target == NIGHT_TARGET {
+            esp32_phyllotaxis::display_mode::apply_night(&mut led_buf);
+        }
         power_limiter.apply(&mut led_buf);
 
         encode(&led_buf, &mut tx_buf);
@@ -397,6 +441,52 @@ async fn render(
             Timer::at(next).await;
         }
     }
+}
+
+async fn enter_deep_sleep(
+    mut spi: SpiDmaBus<'static, Async>,
+    mut watchdog: Wdt<esp_hal::peripherals::TIMG0<'static>>,
+    lpwr: esp_hal::peripherals::LPWR<'static>,
+    led_buf: &mut [Rgb; NUM_LEDS],
+    tx_buf: &mut [u8; SPI_FRAME],
+) -> ! {
+    // Latch black before disconnecting SPI from the strip.
+    led_buf.fill(Rgb::new(0, 0, 0));
+    encode(led_buf, tx_buf);
+    if let Err(e) = spi.write_async(tx_buf).await {
+        warn!("sleep blackout SPI error: {}", e);
+    }
+    Timer::after(Duration::from_millis(2)).await;
+
+    // The encoder task owns GPIO17. Stop it before safely reclaiming the
+    // button as an RTC wake source.
+    RELEASE_FOR_SLEEP.store(true, core::sync::atomic::Ordering::Release);
+    while !RELEASED_FOR_SLEEP.load(core::sync::atomic::Ordering::Acquire) {
+        watchdog.feed();
+        Timer::after(Duration::from_millis(1)).await;
+    }
+
+    // The completed DMA write owns no in-flight buffers. Dropping the SPI bus
+    // disconnects its MOSI signal, after which GPIO4 can be reclaimed safely.
+    drop(spi);
+
+    // Clear the RTC-domain output latch before enabling GPIO4 as an RTC output.
+    // EXT0 keeps RTC peripherals powered, so this actively holds the WS2812
+    // data input low throughout deep sleep rather than leaving it floating.
+    esp_hal::peripherals::RTC_IO::regs()
+        .rtc_gpio_out_w1tc()
+        .write(|w| unsafe { w.rtc_gpio_out_data_w1tc().bits(1 << 4) });
+    let _data_low =
+        LowPowerOutput::<'static, 4>::new(unsafe { esp_hal::peripherals::GPIO4::steal() });
+
+    let wake_button = unsafe { esp_hal::peripherals::GPIO17::steal() };
+    wake_button.rtcio_pullup(true);
+    wake_button.rtcio_pulldown(false);
+    let wake = Ext0WakeupSource::new(wake_button, WakeupLevel::Low);
+
+    watchdog.disable();
+    let mut rtc = Rtc::new(lpwr);
+    rtc.sleep_deep(&[&wake]);
 }
 
 // One FFT window = 512 frames x 8 bytes/frame = 4096 bytes (multiple of the 8-byte frame,

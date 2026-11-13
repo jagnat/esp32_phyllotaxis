@@ -100,10 +100,10 @@ Sketches persist in 100 fixed 32 KiB slots in the `sketches` flash partition
 The header is committed only after the payload is complete and CRC-protected;
 interrupted writes therefore fail closed.
 
-The physical menu always begins with the permanent main vibe, followed by one
-item for every occupied gallery slot in numeric slot order. Upload and delete
-operations update that menu without rebooting. Hovering loads the corresponding
-module and uses its optional `preview` export.
+The physical menu begins with the permanent main vibe, night mode, and sleep,
+followed by one item for every occupied gallery slot in numeric slot order.
+Upload and delete operations update that menu without rebooting. Hovering loads
+the corresponding module and uses its optional `preview` export.
 
 Build the Rust example with `cargo build --release` from `tools/testmod/`.
 Debug WASM output is far too large for a slot.

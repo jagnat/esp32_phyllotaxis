@@ -46,5 +46,6 @@ modules at or below 32,704 bytes and rendering within the 120K fuel budget.
 
 The persistent ID is the numeric slot, 0 through 99. A slot also has a display
 name and menu color. Names are metadata rather than unique IDs. Every occupied
-slot appears as its own physical-menu item. `./phyllo list` returns every
-occupied slot; `upload` replaces the configured slot, and `delete` removes it.
+slot appears as its own physical-menu item after the built-in main, night, and
+sleep entries. `./phyllo list` returns every occupied slot; `upload` replaces
+the configured slot, and `delete` removes it.

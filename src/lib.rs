@@ -6,6 +6,7 @@ extern crate alloc;
 
 pub mod util;
 pub mod audio;
+pub mod display_mode;
 pub mod sketches;
 pub mod input;
 pub mod net;
