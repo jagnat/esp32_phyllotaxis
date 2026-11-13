@@ -13,6 +13,10 @@ pub static BUTTON_RELEASED: AtomicBool = AtomicBool::new(false);
 pub static BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
 /// Raw (undebounced) pin levels for diagnostics: bit2 = A, bit1 = B, bit0 = button.
 pub static RAW_PINS: AtomicU8 = AtomicU8::new(0);
+/// Requests that the encoder task release its GPIOs before deep sleep.
+pub static RELEASE_FOR_SLEEP: AtomicBool = AtomicBool::new(false);
+/// Set when the encoder task has stopped using all three EC11 GPIOs.
+pub static RELEASED_FOR_SLEEP: AtomicBool = AtomicBool::new(false);
 
 // Quadrature transition table, indexed by (prev_ab << 2) | ab. Invalid
 // transitions (both lines changed) contribute 0, so contact bounce cancels
@@ -31,11 +35,18 @@ fn ab(a: &Input, b: &Input) -> u8 {
 /// committed only at the rest position (both lines high).
 #[embassy_executor::task]
 pub async fn encoder_task(a: Input<'static>, b: Input<'static>, btn: Input<'static>) {
+    RELEASED_FOR_SLEEP.store(false, Ordering::Relaxed);
+
     // Do not turn power-up transients (or a button held while powering on) into
     // a release/detent event. Arm only after every input has remained at its
     // pull-up idle level for a short, continuous interval.
     let mut idle_since = Instant::now();
     loop {
+        if RELEASE_FOR_SLEEP.load(Ordering::Acquire) {
+            RELEASED_FOR_SLEEP.store(true, Ordering::Release);
+            return;
+        }
+
         let cur = ab(&a, &b);
         let raw = btn.is_high();
         RAW_PINS.store((cur << 1) | raw as u8, Ordering::Relaxed);
@@ -61,6 +72,11 @@ pub async fn encoder_task(a: Input<'static>, b: Input<'static>, btn: Input<'stat
     let mut btn_change = Instant::now();
 
     loop {
+        if RELEASE_FOR_SLEEP.load(Ordering::Acquire) {
+            RELEASED_FOR_SLEEP.store(true, Ordering::Release);
+            return;
+        }
+
         let cur = ab(&a, &b);
         let raw = btn.is_high();
         RAW_PINS.store((cur << 1) | raw as u8, Ordering::Relaxed);

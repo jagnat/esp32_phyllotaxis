@@ -60,10 +60,10 @@ allowing everyone on the local network to manage the gallery:
 - slot metadata is committed last after the CRC-protected payload;
 - the partition and implementation provide 100 slots.
 
-Every occupied gallery slot is now an individual physical-menu choice after the
-permanent main vibe. Remaining boundaries: the HTTP API must not be exposed
-directly to the public Internet. Upload and rewrite stress testing with Wi-Fi
-enabled is still required before unattended deployment.
+Every occupied gallery slot is an individual physical-menu choice after the
+permanent main, night, and sleep entries. Remaining boundaries: the HTTP API
+must not be exposed directly to the public Internet. Upload and rewrite stress
+testing with Wi-Fi enabled is still required before unattended deployment.
 
 ## Decision
 
